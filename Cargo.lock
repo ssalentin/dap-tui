@@ -258,6 +258,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "libc",
  "ratatui",
  "serde",
  "toml",

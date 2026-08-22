@@ -16,17 +16,15 @@ pub enum Tab {
     Dashboard = 0,
     Sync = 1,
     Logs = 2,
-    Config = 3,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Dashboard, Tab::Sync, Tab::Logs, Tab::Config];
+    pub const ALL: [Tab; 3] = [Tab::Dashboard, Tab::Sync, Tab::Logs];
     pub fn label(&self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Sync => "Sync",
             Tab::Logs => "Logs",
-            Tab::Config => "Config",
         }
     }
     pub fn number(&self) -> usize {
@@ -34,7 +32,6 @@ impl Tab {
             Tab::Dashboard => 1,
             Tab::Sync => 2,
             Tab::Logs => 3,
-            Tab::Config => 4,
         }
     }
 }
@@ -196,7 +193,6 @@ impl App {
             KeyCode::Char('1') => self.tab = Tab::Dashboard,
             KeyCode::Char('2') => self.tab = Tab::Sync,
             KeyCode::Char('3') => self.tab = Tab::Logs,
-            KeyCode::Char('4') => self.tab = Tab::Config,
             _ => {}
         }
     }

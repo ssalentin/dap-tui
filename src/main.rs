@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod disk;
 mod engine;
 mod progress;
 mod ui;

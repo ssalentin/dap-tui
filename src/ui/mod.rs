@@ -56,7 +56,6 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App) {
         crate::app::Tab::Dashboard => tabs::dashboard::draw(f, content, app),
         crate::app::Tab::Sync => tabs::sync::draw(f, content, app),
         crate::app::Tab::Logs => tabs::logs::draw(f, content, app),
-        crate::app::Tab::Config => tabs::config_view::draw(f, content, app),
     }
 }
 
@@ -82,15 +81,13 @@ fn draw_help(f: &mut Frame) {
         "  ↑↓ / j k     move selection",
         "  s / Enter     sync selected device",
         "  a             abort running sync",
-        "  Tab / 1-4     switch tab",
+        "  Tab / 1-3     switch tab",
         "  r             refresh devices",
         "  f             toggle log follow",
         "  u / d         scroll logs",
         "  x             clear logs",
         "  ? / h         this help",
         "  q / Esc       quit",
-        "",
-        "  ←  →          (todo: device nav)",
     ];
     let mut spans = Vec::new();
     for (i, line) in lines.iter().enumerate() {

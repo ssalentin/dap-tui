@@ -1,4 +1,6 @@
 use crate::app::{relative_ago, App};
+use crate::config::Firmware;
+use crate::disk::{disk_stats, fmt_bytes};
 use crate::ui::theme;
 use crate::ui::truncate;
 use ratatui::Frame;
@@ -21,25 +23,18 @@ fn card(title: &str) -> Block<'static> {
 
 fn kv<'a>(label: &str, value: String, value_style: Style) -> Line<'a> {
     Line::from(vec![
-        Span::styled(
-            format!("  {label:<12}"),
-            Style::default().fg(theme::DIM),
-        ),
+        Span::styled(format!("  {label:<14}"), Style::default().fg(theme::DIM)),
         Span::styled(value, value_style),
     ])
 }
 
-fn firmware_badge(fw: &str) -> Span<'static> {
-    let color = match fw {
-        "rockbox" => theme::MAGENTA,
-        "android" => theme::CYAN,
-        "mlove" => theme::ORANGE,
-        _ => theme::GREEN,
-    };
-    Span::styled(
-        format!(" [{fw}] "),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )
+fn firmware_color(fw: &Firmware) -> ratatui::style::Color {
+    match fw {
+        Firmware::Rockbox => theme::MAGENTA,
+        Firmware::Android => theme::CYAN,
+        Firmware::Mlove => theme::ORANGE,
+        Firmware::Apple => theme::GREEN,
+    }
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
@@ -48,21 +43,41 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let [top, chain] = Layout::vertical([Constraint::Min(8), Constraint::Length(4)]).areas(area);
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
+    let [row1, row2, chain] = Layout::vertical([
+        Constraint::Min(9),
+        Constraint::Min(8),
+        Constraint::Length(4),
+    ])
+    .areas(area);
 
-    // ── device card ──
-    let dev_block = card("DEVICE");
-    let inner = dev_block.inner(left);
-    f.render_widget(dev_block, left);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)]).areas(row1);
+    draw_device_card(f, left, app, device);
+    draw_settings_card(f, right, device);
+
+    let [lib, pipe] =
+        Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).areas(row2);
+    draw_library_card(f, lib, app);
+    draw_pipeline_card(f, pipe, device);
+
+    draw_chain(f, chain, app, device);
+}
+
+fn draw_device_card(f: &mut Frame, area: Rect, app: &App, device: &crate::config::Device) {
+    let block = card("DEVICE");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let name = truncate(&device.name, inner.width.saturating_sub(6) as usize);
+    let fw = device.firmware.label().to_string();
+    let fw_color = firmware_color(&device.firmware);
 
     let status = if device.mounted {
         Span::styled("● mounted", Style::default().fg(theme::GREEN))
     } else {
         Span::styled("○ not mounted", Style::default().fg(theme::RED))
     };
-    let fw = device.firmware.label().to_string();
+
     let last = match device.last_sync {
         Some(dt) => {
             if device.last_status == "ok" {
@@ -74,36 +89,127 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         None => "never".to_string(),
     };
 
-    let lines = vec![
+    let mut lines: Vec<Line> = vec![
         Line::from(vec![
             Span::raw("  "),
+            Span::styled(name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
             Span::styled(
-                truncate(&device.name, inner.width.saturating_sub(4) as usize),
-                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                format!(" [{fw}] "),
+                Style::default().fg(fw_color).add_modifier(Modifier::BOLD),
             ),
-            firmware_badge(&fw),
         ]),
         Line::raw(""),
         Line::from(vec![
             Span::styled("  status", Style::default().fg(theme::DIM)),
-            Span::raw("       "),
-            status.clone(),
+            Span::raw("         "),
+            status,
         ]),
-        kv("firmware", fw.clone(), Style::default().fg(theme::FG)),
-        kv("content", device.content_type.clone(), Style::default().fg(theme::FG)),
-        kv("mount", device.mount_str(), Style::default().fg(theme::CYAN)),
-        kv("folder", device.music_folder.clone(), Style::default().fg(theme::CYAN)),
         kv("last sync", last, Style::default().fg(theme::YELLOW)),
     ];
+
+    // mounted storage usage (total / available)
+    let storage = if device.mounted {
+        device.mount_point.as_ref().and_then(|p| disk_stats(p))
+    } else {
+        None
+    };
+
+    if let Some(stats) = storage {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("  storage", Style::default().fg(theme::DIM)),
+            Span::raw("       "),
+            Span::styled(
+                format!(
+                    "{} total · {} free",
+                    fmt_bytes(stats.total),
+                    fmt_bytes(stats.available)
+                ),
+                Style::default().fg(theme::CYAN),
+            ),
+        ]));
+    }
+    let _ = app;
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 
-    // ── library card ──
-    let lib_block = card("LIBRARY");
-    let inner = lib_block.inner(right);
-    f.render_widget(lib_block, right);
+    // storage usage gauge underneath
+    if let Some(stats) = storage {
+        let used = stats.total.saturating_sub(stats.available);
+        let pct = if stats.total > 0 {
+            (used as f64 / stats.total as f64 * 100.0) as u16
+        } else {
+            0
+        };
+        let gauge_area = Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            x: inner.x,
+            width: inner.width,
+            height: 1,
+        };
+        f.render_widget(
+            ratatui::widgets::Gauge::default()
+                .gauge_style(Style::default().fg(theme::ACCENT).bg(theme::BG_ALT))
+                .ratio((pct as f64) / 100.0)
+                .label(Span::styled(
+                    format!(" {pct}% used "),
+                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                )),
+            gauge_area,
+        );
+    }
+}
+
+fn draw_settings_card(f: &mut Frame, area: Rect, device: &crate::config::Device) {
+    let block = card("PLAYER SETTINGS");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = vec![Line::raw("")];
+    lines.push(kv(
+        "content type",
+        device.content_type.clone(),
+        Style::default().fg(theme::FG),
+    ));
+    lines.push(kv(
+        "mount point",
+        device.mount_str(),
+        Style::default().fg(theme::CYAN),
+    ));
+    lines.push(kv(
+        "music folder",
+        device.music_folder.clone(),
+        Style::default().fg(theme::CYAN),
+    ));
+    lines.push(kv(
+        "fat order",
+        if device.preserve_fat_order { "yes".into() } else { "no".into() },
+        Style::default().fg(if device.preserve_fat_order { theme::YELLOW } else { theme::DIM }),
+    ));
+    if device.firmware == Firmware::Apple {
+        lines.push(kv(
+            "sync command",
+            truncate(&device.sync_command, inner.width.saturating_sub(18) as usize),
+            Style::default().fg(theme::MAGENTA),
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  edit ~/.config/dap-sync/config.toml",
+            Style::default().fg(theme::DIM),
+        ),
+    ]));
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
+}
+
+fn draw_library_card(f: &mut Frame, area: Rect, app: &App) {
+    let block = card("LIBRARY");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     let excludes = app.config.storagebox_excludes.len();
-    let lib_lines = vec![
+    let lines = vec![
+        Line::raw(""),
         kv(
             "music",
             app.config.local_music_dir.display().to_string(),
@@ -137,13 +243,41 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::DIM),
         ),
     ];
-    f.render_widget(Paragraph::new(lib_lines).style(Style::default().bg(theme::PANEL_BG)), inner);
-
-    // ── source chain ──
-    draw_chain(f, chain, app, device.name.clone());
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 
-fn draw_chain(f: &mut Frame, area: Rect, app: &App, device_name: String) {
+fn draw_pipeline_card(f: &mut Frame, area: Rect, device: &crate::config::Device) {
+    let block = card("SYNC PIPELINE");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let steps: Vec<(&str, &str)> = vec![
+        ("1", "mirror StorageBox → local"),
+        ("2", "NFC-aware diff"),
+        ("3", "rsync copy"),
+        ("4", if device.firmware == Firmware::Mlove {
+            "eject + fatsort"
+        } else {
+            "eject"
+        }),
+    ];
+    let mut lines: Vec<Line> = Vec::new();
+    for (n, label) in steps {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!(" {n} "),
+                Style::default().fg(theme::BG).bg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(label, Style::default().fg(theme::FG)),
+        ]));
+        lines.push(Line::raw(""));
+    }
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
+}
+
+fn draw_chain(f: &mut Frame, area: Rect, app: &App, device: &crate::config::Device) {
     let block = card("SYNC PATH");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -157,7 +291,7 @@ fn draw_chain(f: &mut Frame, area: Rect, app: &App, device_name: String) {
 
     let src = truncate(&app.config.storagebox_source, seg1.max(3));
     let local = truncate(&app.config.local_music_dir.display().to_string(), seg2.max(3));
-    let device = truncate(&device_name, seg3.max(3));
+    let device_name = truncate(&device.name, seg3.max(3));
 
     let mut line = vec![
         Span::raw("  "),
@@ -165,7 +299,7 @@ fn draw_chain(f: &mut Frame, area: Rect, app: &App, device_name: String) {
         arrow("rclone"),
         chip(&local),
         arrow("rsync"),
-        chip(&device),
+        chip(&device_name),
     ];
     let used: usize = line.iter().map(|s| s.width()).sum();
     if used < inner.width as usize {
@@ -185,10 +319,7 @@ fn chip(text: &str) -> Span<'static> {
 }
 
 fn arrow(label: &str) -> Span<'static> {
-    Span::styled(
-        format!(" ─{label}▶ "),
-        Style::default().fg(theme::CYAN),
-    )
+    Span::styled(format!(" ─{label}▶ "), Style::default().fg(theme::CYAN))
 }
 
 fn draw_empty(f: &mut Frame, area: Rect) {

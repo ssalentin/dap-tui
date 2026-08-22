@@ -124,7 +124,6 @@ pub struct Config {
     pub storagebox_hoerspiele_source: String,
     pub storagebox_excludes: Vec<String>,
     pub devices: Vec<Device>,
-    pub raw_text: String,
 }
 
 impl Config {
@@ -258,7 +257,6 @@ pub fn load(config_path: Option<String>) -> Result<Config> {
                 .map(|v| v.clone())
                 .unwrap_or_else(|| DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect()),
             devices,
-            raw_text: text,
         }
     } else {
         Config {
@@ -270,7 +268,6 @@ pub fn load(config_path: Option<String>) -> Result<Config> {
             storagebox_hoerspiele_source: DEFAULT_STORAGEBOX_HOERSPIELE_SOURCE.to_string(),
             storagebox_excludes: DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect(),
             devices: Vec::new(),
-            raw_text: "# no config file found\n".to_string(),
         }
     };
 

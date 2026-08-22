@@ -13,12 +13,12 @@ living dashboard instead of a batch CLI.
   bars.
 - **Devices sidebar** — live mount status (green dot = mounted), firmware tags,
   last-sync age per device.
-- **4 tabs** — Dashboard (device + library cards, source-chain diagram), Sync
-  (live step pipeline + progress gauge), Logs (color-coded, follow mode),
-  Config (syntax-coloured TOML).
-- **Live sync engine** — streams `rclone` and `rsync` output, parses progress,
-  NFC-aware diffing for macOS→FAT32/Android devices, optional `fatsort`
-  finalize for Mlove devices.
+- **3 tabs** — Dashboard (per-player overview + settings, storage usage when
+  mounted, library + sync pipeline), Sync (live step pipeline + progress
+  gauge), Logs (color-coded, follow mode).
+- **Live sync engine** — streams `rclone` and `rsync` output, parses progress
+  (byte-weighted via `--info=progress2`), NFC-aware diffing for
+  macOS→FAT32/Android devices, optional `fatsort` finalize for Mlove devices.
 - **Abort-safe** — `a` kills the running child process cleanly.
 - Reads the existing `~/.config/dap-sync/config.toml` (compatible with
   `dap-sync`), persists last-sync state to `~/.local/share/dap-sync/sync-state.toml`.
@@ -39,7 +39,7 @@ cargo build --release
 | `↑`/`↓` `j`/`k` | move selection             |
 | `s` / `Enter`| sync selected device         |
 | `a`          | abort running sync           |
-| `Tab` / `1-4`| switch tab                   |
+| `Tab` / `1-3`| switch tab                   |
 | `r`          | refresh device mounts        |
 | `f`          | toggle log follow            |
 | `u` / `d`    | scroll logs                  |
