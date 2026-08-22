@@ -1,0 +1,15 @@
+use ratatui::style::Color;
+
+// Tokyo Night palette
+pub const BG: Color = Color::Rgb(0x1a, 0x1b, 0x26);
+pub const BG_ALT: Color = Color::Rgb(0x16, 0x16, 0x1e);
+pub const PANEL_BG: Color = Color::Rgb(0x1f, 0x23, 0x33);
+pub const FG: Color = Color::Rgb(0xc0, 0xca, 0xf5);
+pub const DIM: Color = Color::Rgb(0x56, 0x5f, 0x89);
+pub const ACCENT: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
+pub const CYAN: Color = Color::Rgb(0x7d, 0xcf, 0xff);
+pub const GREEN: Color = Color::Rgb(0x9e, 0xce, 0x6a);
+pub const YELLOW: Color = Color::Rgb(0xe0, 0xaf, 0x68);
+pub const RED: Color = Color::Rgb(0xf7, 0x76, 0x8e);
+pub const MAGENTA: Color = Color::Rgb(0xbb, 0x9a, 0xf7);
+pub const ORANGE: Color = Color::Rgb(0xff, 0x9e, 0x64);
