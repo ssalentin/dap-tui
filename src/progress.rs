@@ -6,8 +6,10 @@ const AUDIO_EXTS: &[&str] = &[".m4a", ".mp3", ".aac", ".ogg", ".wav", ".wv", ".a
 pub enum RsyncLine {
     /// Total file count announced by rsync ("Transfer starting: N files")
     Total(u64),
-    /// A per-file progress update
+    /// A per-file completion update ("… (xfr#N, to-check=M/T)")
     Progress(RsyncProgress),
+    /// Live byte progress of the current file ("bytes pct% speed ETA")
+    ByteProgress(RsyncProgress),
     /// A transferred audio file path (current file being handled)
     File(String),
 }
@@ -111,6 +113,26 @@ pub fn parse_rsync_line(line: &str) -> Option<RsyncLine> {
             speed: find_speed(line),
             eta: find_eta(line),
         }));
+    }
+
+    // Live byte progress of the current file: " 32.768 0% 999,51MB/s 0:00:00 "
+    // (no xfr# yet — rsync emits these with \r as the file transfers).
+    if line.contains('%') {
+        let starts_with_digit = line
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false);
+        let speed = find_speed(line);
+        if starts_with_digit || !speed.is_empty() {
+            return Some(RsyncLine::ByteProgress(RsyncProgress {
+                done: 0,
+                total: 0,
+                pct: find_pct(line).unwrap_or(0),
+                speed,
+                eta: find_eta(line),
+            }));
+        }
     }
 
     // Plain audio file path line (transferred file being processed).
@@ -220,6 +242,18 @@ mod tests {
         match parse_rsync_line("Artist - Album/track1.mp3") {
             Some(RsyncLine::File(p)) => assert_eq!(p, "Artist - Album/track1.mp3"),
             other => panic!("expected file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_live_byte_progress_without_xfr() {
+        // rsync \r segment during a large-file transfer
+        match parse_rsync_line("         32.768   0%    0,00kB/s    0:00:00") {
+            Some(RsyncLine::ByteProgress(p)) => {
+                assert_eq!(p.pct, 0);
+                assert_eq!(p.speed, "0,00kB/s");
+            }
+            other => panic!("expected byte progress, got {other:?}"),
         }
     }
 }

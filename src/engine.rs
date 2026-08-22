@@ -129,7 +129,7 @@ impl WorkerCtx {
         self.changed();
     }
 
-    fn set_device_progress(&self, done: u64, total: u64, speed: &str, eta: &str, current: &str) {
+    fn set_device_progress(&self, done: u64, total: u64, speed: &str, eta: &str, current: &str, pct: Option<u16>) {
         if let Ok(mut s) = self.state.lock() {
             let p = &mut s.device_prog;
             p.done = done.to_string();
@@ -139,7 +139,9 @@ impl WorkerCtx {
             if !current.is_empty() {
                 p.current = current.to_string();
             }
-            if total > 0 {
+            if let Some(pct) = pct {
+                p.pct = pct.min(100);
+            } else if total > 0 {
                 p.pct = ((done as f64 / total as f64) * 100.0) as u16;
             }
         }
@@ -353,6 +355,14 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
                         }
                         true
                     }
+                    RsyncLine::ByteProgress(p) => {
+                        if let Ok(mut s) = ctx.state.lock() {
+                            s.mirror.pct = p.pct;
+                            s.mirror.speed = p.speed.clone();
+                            s.mirror.eta = p.eta.clone();
+                        }
+                        true
+                    }
                     RsyncLine::Total(_) | RsyncLine::File(_) => true,
                 }
             } else {
@@ -475,8 +485,10 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     fs::create_dir_all(&dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
 
     ctx.log(LogLevel::Info, format!("Scanning local {label} library…"));
+    ctx.set_step(1, StepStatus::Active, format!("scanning local {label} library…"));
     let src_map = scan_music_dir(&src_dir);
     ctx.log(LogLevel::Info, format!("Scanning device {}…", dest.display()));
+    ctx.set_step(1, StepStatus::Active, format!("scanning device {}…", dest.display()));
     let dst_map = scan_music_dir(&dest);
 
     let mut to_copy: Vec<String> = Vec::new();
@@ -510,11 +522,13 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     }
 
     if !to_delete.is_empty() {
+        ctx.set_step(1, StepStatus::Active, format!("removing {} stale file(s)…", to_delete.len()));
         remove_stale(&dest, &to_delete);
         ctx.log(LogLevel::Info, format!("Removed {} stale file(s).", to_delete.len()));
     }
 
     if !to_copy.is_empty() {
+        ctx.set_step(1, StepStatus::Active, format!("copying {} file(s)…", to_copy.len()));
         let tmp = write_file_list(&to_copy)?;
         let res = {
             let args = vec![
@@ -528,16 +542,26 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
                 dest.display().to_string(),
             ];
             let total = to_copy.len() as u64;
+            let mut xfr_done: u64 = 0;
+            let mut cur_pct: u16 = 0;
             stream(ctx, "rsync", &args, |line| {
                 match parse_rsync_line(line) {
                     Some(RsyncLine::Progress(p)) => {
-                        let done = if p.done > 0 { p.done } else { total };
-                        ctx.set_device_progress(done, total, &p.speed, &p.eta, "");
+                        xfr_done = p.done.max(1);
+                        cur_pct = 100;
+                        let pct = smooth_pct(xfr_done, cur_pct, total);
+                        ctx.set_device_progress(xfr_done, total, &p.speed, &p.eta, "", Some(pct));
+                        true
+                    }
+                    Some(RsyncLine::ByteProgress(p)) => {
+                        cur_pct = p.pct;
+                        let pct = smooth_pct(xfr_done, cur_pct, total);
+                        ctx.set_device_progress(xfr_done, total, &p.speed, &p.eta, "", Some(pct));
                         true
                     }
                     Some(RsyncLine::Total(_)) => true,
                     Some(RsyncLine::File(path)) => {
-                        ctx.set_device_progress(0, total, "", "", &path);
+                        ctx.set_device_progress(0, total, "", "", &path, None);
                         ctx.log(LogLevel::Transfer, path);
                         true
                     }
@@ -601,6 +625,16 @@ fn write_file_list(items: &[String]) -> Result<String, String> {
 }
 
 // ── mlove finalize ────────────────────────────────────────────────────────────
+
+/// Combine completed files with the current file's byte fraction for a smooth
+/// overall percentage, e.g. 3 files done + file at 50% over 5 total → 70%.
+fn smooth_pct(xfr_done: u64, cur_pct: u16, total: u64) -> u16 {
+    if total == 0 {
+        return 0;
+    }
+    let ratio = xfr_done as f64 + (cur_pct as f64 / 100.0);
+    ((ratio / total as f64) * 100.0).clamp(0.0, 100.0) as u16
+}
 
 fn capture(cmd: &str, args: &[&str]) -> Result<(i32, String), String> {
     let out = Command::new(cmd)
@@ -773,4 +807,22 @@ where
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smooth_pct;
+
+    #[test]
+    fn smooth_progress_advances_within_a_file() {
+        // 3 files done, current at 50%, 5 total → (3 + 0.5)/5 = 70%
+        assert_eq!(smooth_pct(3, 50, 5), 70);
+        // 3 files done, current at 0% → 60%
+        assert_eq!(smooth_pct(3, 0, 5), 60);
+        // 1 file done, current at 100% → 40% (xfr#1 line arrives before next file)
+        assert_eq!(smooth_pct(1, 100, 5), 40);
+        // everything done
+        assert_eq!(smooth_pct(5, 100, 5), 100);
+        assert_eq!(smooth_pct(0, 100, 0), 0);
+    }
 }
