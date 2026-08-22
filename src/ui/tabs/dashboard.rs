@@ -33,7 +33,8 @@ fn firmware_color(fw: &Firmware) -> ratatui::style::Color {
         Firmware::Rockbox => theme::MAGENTA,
         Firmware::Android => theme::CYAN,
         Firmware::Mlove => theme::ORANGE,
-        Firmware::Apple => theme::GREEN,
+        Firmware::Sony => theme::GREEN,
+        Firmware::Apple => theme::YELLOW,
     }
 }
 

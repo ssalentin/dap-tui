@@ -67,9 +67,9 @@ mount_point = "/media/sebastian/IPOD"
 music_folder = "Music"
 ```
 
-Firmware types: `apple` (podkit command), `rockbox`, `android` (rsync),
-`mlove` (rsync + `fatsort`). Devices with `content_type = "hoerspiele"` sync
-against the hoerspiele library.
+Firmware types: `apple` (podkit command), `rockbox`, `android`, `sony`
+(rsync to a mounted volume), `mlove` (rsync + `fatsort`). Devices with
+`content_type = "hoerspiele"` sync against the hoerspiele library.
 
 ## How the sync pipeline works
 

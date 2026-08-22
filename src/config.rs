@@ -70,6 +70,7 @@ pub enum Firmware {
     Rockbox,
     Android,
     Mlove,
+    Sony,
 }
 
 impl Firmware {
@@ -78,6 +79,7 @@ impl Firmware {
             "rockbox" => Firmware::Rockbox,
             "android" => Firmware::Android,
             "mlove" => Firmware::Mlove,
+            "sony" => Firmware::Sony,
             _ => Firmware::Apple,
         }
     }
@@ -87,6 +89,7 @@ impl Firmware {
             Firmware::Rockbox => "rockbox",
             Firmware::Android => "android",
             Firmware::Mlove => "mlove",
+            Firmware::Sony => "sony",
         }
     }
 }
@@ -374,5 +377,29 @@ music_folder = "Music"
         assert_eq!(d.music_folder, "Music");
         assert_eq!(cfg.storagebox_excludes, vec![".DS_Store"]);
         assert_eq!(cfg.local_music_dir, dirs::home_dir().unwrap().join("Music"));
+    }
+
+    #[test]
+    fn loads_sony_firmware_as_rockbox_style() {
+        let dir = std::env::temp_dir().join("dap-tui-sony-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[devices]]
+name = "Sony NW-A55"
+firmware = "sony"
+mount_point = "/media/SD_CARD"
+music_folder = "MUSIC"
+"#,
+        )
+        .unwrap();
+        let cfg = load(Some(path.display().to_string())).unwrap();
+        assert_eq!(cfg.devices.len(), 1);
+        let d = &cfg.devices[0];
+        assert_eq!(d.firmware, Firmware::Sony);
+        assert_eq!(d.music_folder, "MUSIC");
+        assert_eq!(d.preserve_fat_order, false);
     }
 }
