@@ -39,6 +39,7 @@ cargo build --release
 | `↑`/`↓` `j`/`k` | move selection             |
 | `s` / `Enter`| sync selected device         |
 | `a`          | abort running sync           |
+| `m`          | mount / unmount device (udisks2, no sudo) |
 | `Tab` / `1-3`| switch tab                   |
 | `r`          | refresh device mounts        |
 | `f`          | toggle log follow            |
@@ -82,6 +83,13 @@ Firmware types: `apple` (podkit command), `rockbox`, `android`, `sony`
 4. **Finalize** (mlove) — unmounts the volume and runs `fatsort` via
    `sudo -n` to keep FAT directory order stable. If passwordless sudo is not
    available the step is reported as a warning and the commands are printed.
+
+## Mounting
+
+Devices are mounted/unmounted without sudo via **udisks2**:
+`m` in the TUI mounts/unmounts the selected device, and a sync automatically
+mounts the target first (resolved by mount-point label via `lsblk`). Only the
+mlove `fatsort` step needs root (raw block device).
 
 ## Development
 

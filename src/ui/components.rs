@@ -353,6 +353,7 @@ pub fn draw_keys(f: &mut Frame, area: Rect, _app: &App) {
         ("↑↓/jk", "nav"),
         ("s", "sync"),
         ("a", "abort"),
+        ("m", "mount"),
         ("Tab/1-3", "tab"),
         ("r", "refresh"),
         ("f", "follow"),

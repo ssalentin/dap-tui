@@ -145,6 +145,34 @@ impl App {
         }
     }
 
+    fn toggle_mount(&mut self) {
+        let Some(device) = self.selected_device().cloned() else {
+            self.status_msg = Some(("no device selected".to_string(), LogLevel::Warn));
+            return;
+        };
+        let Some(mp) = device.mount_point.clone() else {
+            self.status_msg = Some(("device has no mount_point".to_string(), LogLevel::Warn));
+            return;
+        };
+        if self.is_syncing() {
+            return;
+        }
+        let (action, res) = if device.mounted {
+            ("Unmounting", crate::udisks::unmount_device(&mp))
+        } else {
+            ("Mounting", crate::udisks::mount_device(&mp))
+        };
+        match res {
+            Ok(msg) => {
+                self.status_msg = Some((format!("{action}: {msg}"), LogLevel::Success));
+            }
+            Err(e) => {
+                self.status_msg = Some((format!("{action} failed — {e}"), LogLevel::Error));
+            }
+        }
+        self.refresh_mounts();
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -174,6 +202,7 @@ impl App {
             }
             KeyCode::Char('s') | KeyCode::Enter => self.start_sync(),
             KeyCode::Char('a') => self.abort_sync(),
+            KeyCode::Char('m') => self.toggle_mount(),
             KeyCode::Char('r') => {
                 self.refresh_mounts();
                 self.status_msg = Some(("devices refreshed".to_string(), LogLevel::Info));

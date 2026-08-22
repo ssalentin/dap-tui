@@ -81,6 +81,7 @@ fn draw_help(f: &mut Frame) {
         "  ↑↓ / j k     move selection",
         "  s / Enter     sync selected device",
         "  a             abort running sync",
+        "  m             mount / unmount selected device (udisks)",
         "  Tab / 1-3     switch tab",
         "  r             refresh devices",
         "  f             toggle log follow",

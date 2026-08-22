@@ -479,9 +479,22 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
         .mount_point
         .as_ref()
         .ok_or_else(|| "mount_point is not set for this device".to_string())?;
+
+    if !mount.exists() {
+        ctx.log(LogLevel::Info, format!("device not mounted at {} — trying udisksctl…", mount.display()));
+        match crate::udisks::mount_device(mount) {
+            Ok(msg) => ctx.log(LogLevel::Info, format!("auto-mounted: {msg}")),
+            Err(e) => {
+                return Err(format!(
+                    "device not found at {} — connect & mount it (m) and retry. {e}",
+                    mount.display()
+                ));
+            }
+        }
+    }
     if !mount.exists() {
         return Err(format!(
-            "device not found at {} — connect & mount it, then try again",
+            "device not found at {} — connect & mount it (m) and retry",
             mount.display()
         ));
     }
@@ -650,15 +663,21 @@ fn finalize_fat(device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
     let target = resolve_fatsort_target(mount)?;
 
     ctx.log(LogLevel::Info, format!("Unmounting {mount_display}", mount_display = mount.display()));
-    let (code, detail) = capture("sudo", &["-n", "umount", mount.to_str().unwrap_or("")])?;
-    if code != 0 {
-        ctx.log(
-            LogLevel::Warn,
-            format!(
-                "sudo -n umount failed (exit {code}) {detail} — run manually: sudo umount {mount_display}",
-                mount_display = mount.display()
-            ),
-        );
+    match crate::udisks::unmount_device(mount) {
+        Ok(msg) => ctx.log(LogLevel::Info, format!("unmounted: {msg}")),
+        Err(e) => {
+            // fall back to sudo for setups without udisks
+            let (code, detail) = capture("sudo", &["-n", "umount", mount.to_str().unwrap_or("")])?;
+            if code != 0 {
+                ctx.log(
+                    LogLevel::Warn,
+                    format!(
+                        "udisks failed ({e}) and sudo -n umount failed (exit {code}) {detail} — run manually: sudo umount {mount_display}",
+                        mount_display = mount.display()
+                    ),
+                );
+            }
+        }
     }
 
     ctx.log(LogLevel::Info, format!("Running fatsort on {target}…"));

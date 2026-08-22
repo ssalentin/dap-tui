@@ -3,6 +3,7 @@ mod config;
 mod disk;
 mod engine;
 mod progress;
+mod udisks;
 mod ui;
 
 use anyhow::Result;
