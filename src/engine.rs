@@ -147,6 +147,15 @@ impl WorkerCtx {
         }
         self.changed();
     }
+
+    /// Update only the "currently syncing" file display without touching the
+    /// progress percentage (so a new file's start never resets the bar to 0).
+    fn set_current_file(&self, path: &str) {
+        if let Ok(mut s) = self.state.lock() {
+            s.device_prog.current = path.to_string();
+        }
+        self.changed();
+    }
 }
 
 pub struct Engine {
@@ -345,6 +354,7 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
         return stream(ctx, "rsync", &args, |line| {
             if let Some(l) = parse_rsync_line(line) {
                 match l {
+                    // overall byte-weighted progress (progress2)
                     RsyncLine::Progress(p) => {
                         if let Ok(mut s) = ctx.state.lock() {
                             s.mirror.pct = p.pct;
@@ -355,9 +365,9 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
                         }
                         true
                     }
+                    // per-file byte segment: only speed/eta, never the pct
                     RsyncLine::ByteProgress(p) => {
                         if let Ok(mut s) = ctx.state.lock() {
-                            s.mirror.pct = p.pct;
                             s.mirror.speed = p.speed.clone();
                             s.mirror.eta = p.eta.clone();
                         }
@@ -535,33 +545,28 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
                 "-t".to_string(),
                 "--files-from".to_string(),
                 tmp.clone(),
-                "--progress".to_string(),
+                "--info=progress2".to_string(),
+                "--out-format=%n".to_string(),
                 "--exclude=.DS_Store".to_string(),
                 "--exclude=._*".to_string(),
                 format!("{}/", src_dir.display()),
                 dest.display().to_string(),
             ];
             let total = to_copy.len() as u64;
-            let mut xfr_done: u64 = 0;
-            let mut cur_pct: u16 = 0;
             stream(ctx, "rsync", &args, |line| {
                 match parse_rsync_line(line) {
+                    // overall byte-weighted progress (progress2) — use directly
                     Some(RsyncLine::Progress(p)) => {
-                        xfr_done = p.done.max(1);
-                        cur_pct = 100;
-                        let pct = smooth_pct(xfr_done, cur_pct, total);
-                        ctx.set_device_progress(xfr_done, total, &p.speed, &p.eta, "", Some(pct));
+                        let done = if p.done > 0 { p.done } else { total };
+                        ctx.set_device_progress(done, p.total.max(total), &p.speed, &p.eta, "", Some(p.pct));
                         true
                     }
-                    Some(RsyncLine::ByteProgress(p)) => {
-                        cur_pct = p.pct;
-                        let pct = smooth_pct(xfr_done, cur_pct, total);
-                        ctx.set_device_progress(xfr_done, total, &p.speed, &p.eta, "", Some(pct));
-                        true
-                    }
+                    // live per-file byte segment: consumed, overall % comes from
+                    // the progress2 line above
+                    Some(RsyncLine::ByteProgress(_)) => true,
                     Some(RsyncLine::Total(_)) => true,
                     Some(RsyncLine::File(path)) => {
-                        ctx.set_device_progress(0, total, "", "", &path, None);
+                        ctx.set_current_file(&path);
                         ctx.log(LogLevel::Transfer, path);
                         true
                     }
@@ -625,16 +630,6 @@ fn write_file_list(items: &[String]) -> Result<String, String> {
 }
 
 // ── mlove finalize ────────────────────────────────────────────────────────────
-
-/// Combine completed files with the current file's byte fraction for a smooth
-/// overall percentage, e.g. 3 files done + file at 50% over 5 total → 70%.
-fn smooth_pct(xfr_done: u64, cur_pct: u16, total: u64) -> u16 {
-    if total == 0 {
-        return 0;
-    }
-    let ratio = xfr_done as f64 + (cur_pct as f64 / 100.0);
-    ((ratio / total as f64) * 100.0).clamp(0.0, 100.0) as u16
-}
 
 fn capture(cmd: &str, args: &[&str]) -> Result<(i32, String), String> {
     let out = Command::new(cmd)
@@ -811,18 +806,5 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::smooth_pct;
-
-    #[test]
-    fn smooth_progress_advances_within_a_file() {
-        // 3 files done, current at 50%, 5 total → (3 + 0.5)/5 = 70%
-        assert_eq!(smooth_pct(3, 50, 5), 70);
-        // 3 files done, current at 0% → 60%
-        assert_eq!(smooth_pct(3, 0, 5), 60);
-        // 1 file done, current at 100% → 40% (xfr#1 line arrives before next file)
-        assert_eq!(smooth_pct(1, 100, 5), 40);
-        // everything done
-        assert_eq!(smooth_pct(5, 100, 5), 100);
-        assert_eq!(smooth_pct(0, 100, 0), 0);
-    }
+    // engine logic is exercised through parser + integration tests
 }

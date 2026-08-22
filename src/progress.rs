@@ -256,4 +256,18 @@ mod tests {
             other => panic!("expected byte progress, got {other:?}"),
         }
     }
+
+    #[test]
+    fn parses_progress2_overall_pct() {
+        // --info=progress2 line: byte-weighted overall progress
+        match parse_rsync_line("    209.715.200  66%  566,48MB/s    0:00:00 (xfr#1, to-chk=1/2)") {
+            Some(RsyncLine::Progress(p)) => {
+                assert_eq!(p.pct, 66);
+                assert_eq!(p.done, 1);
+                assert_eq!(p.total, 2);
+                assert_eq!(p.speed, "566,48MB/s");
+            }
+            other => panic!("expected progress, got {other:?}"),
+        }
+    }
 }
