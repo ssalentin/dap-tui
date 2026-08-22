@@ -56,10 +56,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     draw_device_card(f, left, app, device);
     draw_settings_card(f, right, device);
 
-    let [lib, pipe] =
+    let [lib, status] =
         Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).areas(row2);
     draw_library_card(f, lib, app);
-    draw_pipeline_card(f, pipe, device);
+    draw_sync_status_card(f, status, app);
 
     draw_chain(f, chain, app, device);
 }
@@ -247,34 +247,83 @@ fn draw_library_card(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 
-fn draw_pipeline_card(f: &mut Frame, area: Rect, device: &crate::config::Device) {
-    let block = card("SYNC PIPELINE");
+fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
+    let block = card("SYNC STATUS");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let steps: Vec<(&str, &str)> = vec![
-        ("1", "mirror StorageBox → local"),
-        ("2", "NFC-aware diff"),
-        ("3", "rsync copy"),
-        ("4", if device.firmware == Firmware::Mlove {
-            "eject + fatsort"
-        } else {
-            "eject"
-        }),
-    ];
+    let syncing = app.engine.state.lock().map(|s| s.running).unwrap_or(false);
+    let sync_device = if syncing {
+        app.engine.state.lock().unwrap().device.clone()
+    } else {
+        None
+    };
+    let now = chrono::Local::now();
+
+    let mut ok = 0usize;
+    let mut err = 0usize;
+    let mut never = 0usize;
+
     let mut lines: Vec<Line> = Vec::new();
-    for (n, label) in steps {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
+    for device in &app.config.devices {
+        let is_syncing = sync_device.as_ref().map(|d| d == &device.name).unwrap_or(false);
+        let status_span: Span = if is_syncing {
             Span::styled(
-                format!(" {n} "),
-                Style::default().fg(theme::BG).bg(theme::ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(label, Style::default().fg(theme::FG)),
-        ]));
-        lines.push(Line::raw(""));
+                format!("{} syncing…", app.spinner()),
+                Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+            )
+        } else if let Some(dt) = device.last_sync {
+            let ago = relative_ago(dt);
+            if device.last_status == "ok" {
+                ok += 1;
+                Span::styled(
+                    format!("✓ ok · {ago}"),
+                    Style::default().fg(theme::GREEN),
+                )
+            } else {
+                err += 1;
+                Span::styled(
+                    format!("✗ error · {ago}"),
+                    Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+                )
+            }
+        } else {
+            never += 1;
+            Span::styled("— never", Style::default().fg(theme::DIM))
+        };
+
+        let name = truncate(&device.name, inner.width.saturating_sub(26).max(4) as usize);
+        let mut spans: Vec<Span> = vec![Span::raw("  "), Span::styled(name, Style::default().fg(theme::FG))];
+        let used: usize = spans.iter().map(|s| s.width()).sum();
+        let left = inner.width as usize - 2 - status_span.width();
+        if used < left {
+            spans.push(Span::raw(" ".repeat(left - used)));
+        }
+        spans.push(status_span);
+        lines.push(Line::from(spans));
     }
+
+    // summary footer
+    lines.push(Line::raw(""));
+    let summary = format!(
+        "  {ok} ok · {err} error · {never} never · last {last}",
+        last = app
+            .config
+            .devices
+            .iter()
+            .filter_map(|d| d.last_sync)
+            .min_by_key(|dt| {
+                let s = now.signed_duration_since(*dt).num_seconds();
+                s.max(0)
+            })
+            .map(|dt| relative_ago(dt))
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    lines.push(Line::from(Span::styled(
+        truncate(&summary, inner.width as usize),
+        Style::default().fg(theme::DIM),
+    )));
+
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 

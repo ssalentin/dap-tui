@@ -189,10 +189,13 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App, syncing: bool) {
         // status icon
         let is_this = sync_device.as_ref().map(|d| d == &device.name).unwrap_or(false);
         if is_this {
-            spans.push(Span::styled(
-                app.spinner().to_string(),
-                Style::default().fg(theme::BG),
-            ));
+            // dark on the accent selection, bright cyan on the dark unselected row
+            let spinner_style = if selected {
+                Style::default().fg(theme::BG).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(app.spinner().to_string(), spinner_style));
         } else if device.mounted {
             spans.push(Span::styled("●", Style::default().fg(if selected { theme::BG } else { theme::GREEN })));
         } else {
