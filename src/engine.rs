@@ -3,7 +3,6 @@ use crate::progress::{parse_rclone_stats, parse_rsync_line, RsyncLine};
 use chrono::Local;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -394,17 +393,17 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
         args.push("--exclude".to_string());
         args.push(pat.clone());
     }
+    // NOTE: do NOT use `--stats-one-line` here. When stdout/stderr are not a
+    // TTY (which is always the case for us — the child is piped), rclone emits
+    // the one-line stats as a single carriage-return-rewritten line that only
+    // surfaces once at the very end (100%). `--progress` instead emits the
+    // multi-line `Transferred: … / …, N%, speed, ETA …` block newline-terminated,
+    // so it streams live through the pipe and we can update the gauge in real
+    // time while a cloud→local mirror is running.
     args.extend(
-        [
-            "--create-empty-src-dirs",
-            "--stats",
-            "1s",
-            "--stats-one-line",
-            "--stats-log-level",
-            "NOTICE",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
+        ["--create-empty-src-dirs", "--progress", "--stats", "1s"]
+            .iter()
+            .map(|s| s.to_string()),
     );
 
     stream(ctx, "rclone", &args, |line| {
@@ -709,9 +708,48 @@ fn resolve_fatsort_target(mount: &Path) -> Result<String, String> {
 
 // ── subprocess plumbing ───────────────────────────────────────────────────────
 
+/// Read lines from a subprocess pipe and forward them (tagged by origin) to `tx`.
+fn pump_lines<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+    is_stderr: bool,
+    tx: mpsc::Sender<(bool, String)>,
+) {
+    let mut buf = [0u8; 8192];
+    let mut partial: Vec<u8> = Vec::new();
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                partial.extend_from_slice(&buf[..n]);
+                let mut pos = 0;
+                for (i, b) in partial.iter().enumerate() {
+                    if *b == b'\n' || *b == b'\r' {
+                        let line = String::from_utf8_lossy(&partial[pos..i]).trim().to_string();
+                        if !line.is_empty() {
+                            let _ = tx.send((is_stderr, line));
+                        }
+                        pos = i + 1;
+                    }
+                }
+                partial.drain(0..pos);
+            }
+        }
+    }
+    if !partial.is_empty() {
+        let line = String::from_utf8_lossy(&partial).trim().to_string();
+        if !line.is_empty() {
+            let _ = tx.send((is_stderr, line));
+        }
+    }
+}
+
 /// Run a command, streaming its output lines to `on_line`. Returns Err on
 /// failure or abort. Lines returned `true` from `on_line` are treated as
 /// consumed (progress); unconsumed lines are logged.
+///
+/// Both stdout and stderr are pumped into a shared channel so lines from
+/// stderr (e.g. rclone stats) are consumed live instead of being buffered
+/// until the process exits.
 fn stream<F>(
     ctx: &WorkerCtx,
     cmd: &str,
@@ -729,86 +767,43 @@ where
         .spawn()
         .map_err(|e| format!("could not start {cmd}: {e}"))?;
 
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
 
-    let (err_tx, err_rx) = mpsc::channel::<String>();
-    let err_handle = thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        let mut partial: Vec<u8> = Vec::new();
-        loop {
-            match stderr.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    partial.extend_from_slice(&buf[..n]);
-                    let mut pos = 0;
-                    for (i, b) in partial.iter().enumerate() {
-                        if *b == b'\n' || *b == b'\r' {
-                            let line = String::from_utf8_lossy(&partial[pos..i]).trim().to_string();
-                            if !line.is_empty() {
-                                let _ = err_tx.send(line);
-                            }
-                            pos = i + 1;
-                        }
-                    }
-                    partial.drain(0..pos);
-                }
-            }
-        }
-        if !partial.is_empty() {
-            let line = String::from_utf8_lossy(&partial).trim().to_string();
-            if !line.is_empty() {
-                let _ = err_tx.send(line);
-            }
-        }
-    });
+    let (tx, rx) = mpsc::channel::<(bool, String)>(); // (is_stderr, line)
+    let out_tx = tx.clone();
+    let out_thread = thread::spawn(move || pump_lines(stdout, false, out_tx));
+    let err_thread = thread::spawn(move || pump_lines(stderr, true, tx));
 
-    let mut buf = [0u8; 8192];
-    let mut partial: Vec<u8> = Vec::new();
     loop {
         if ctx.abort.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             return Err("aborted".to_string());
         }
-        match stdout.read(&mut buf) {
-            Ok(0) => break,
-            Err(_) => break,
-            Ok(n) => {
-                partial.extend_from_slice(&buf[..n]);
-                let mut pos = 0;
-                for (i, b) in partial.iter().enumerate() {
-                    if *b == b'\n' || *b == b'\r' {
-                        let line = String::from_utf8_lossy(&partial[pos..i]).trim().to_string();
-                        if !line.is_empty() && !on_line(&line) {
-                            ctx.log(LogLevel::Info, line);
-                        }
-                        pos = i + 1;
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok((is_stderr, line)) => {
+                if !line.is_empty() && !on_line(&line) {
+                    if is_stderr {
+                        let lower = line.to_lowercase();
+                        let level = if lower.contains("error") || lower.contains("failed") {
+                            LogLevel::Error
+                        } else {
+                            LogLevel::Info
+                        };
+                        ctx.log(level, line);
+                    } else {
+                        ctx.log(LogLevel::Info, line);
                     }
                 }
-                partial.drain(0..pos);
             }
-        }
-    }
-    if !partial.is_empty() {
-        let line = String::from_utf8_lossy(&partial).trim().to_string();
-        if !line.is_empty() && !on_line(&line) {
-            ctx.log(LogLevel::Info, line);
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    let _ = err_handle.join();
-    for line in err_rx.try_iter() {
-        if !line.is_empty() && !on_line(&line) {
-            let lower = line.to_lowercase();
-            let level = if lower.contains("error") || lower.contains("failed") {
-                LogLevel::Error
-            } else {
-                LogLevel::Info
-            };
-            ctx.log(level, line);
-        }
-    }
+    let _ = out_thread.join();
+    let _ = err_thread.join();
 
     let status = child.wait().map_err(|e| format!("{cmd} failed: {e}"))?;
     if ctx.abort.load(Ordering::Relaxed) {
@@ -825,5 +820,37 @@ where
 
 #[cfg(test)]
 mod tests {
-    // engine logic is exercised through parser + integration tests
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn stream_consumes_stderr_lines_live() {
+        // rclone prints stats to stderr; they must reach on_line while the
+        // process is still running (not only after exit).
+        let (tx, _rx) = mpsc::channel::<EngineEvent>();
+        let ctx = Arc::new(WorkerCtx {
+            state: Arc::new(Mutex::new(SyncState::default())),
+            tx,
+            abort: Arc::new(AtomicBool::new(false)),
+        });
+        let args: Vec<String> = vec![
+            "-c".to_string(),
+            "echo 'NOTICE: first stats line'; sleep 0.5; echo 'NOTICE: second stats line'".to_string(),
+        ];
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let result = stream(&ctx, "sh", &args, move |line| {
+            if line.starts_with("NOTICE:") {
+                seen2.lock().unwrap().push(line.to_string());
+                true
+            } else {
+                false
+            }
+        });
+        assert!(result.is_ok());
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "stderr lines should arrive live");
+        assert!(seen[0].contains("first stats line"));
+        assert!(seen[1].contains("second stats line"));
+    }
 }

@@ -155,31 +155,50 @@ pub struct RcloneStats {
     pub eta: String,
 }
 
-/// Parse a rclone `--stats-one-line` "Transferred:" line.
+/// Parse a rclone stats line. Two shapes are supported:
+///
+/// 1. `--progress` (used by the engine): a `Transferred:` line such as
+///    `Transferred:\t  20.141 MiB / 500 MiB, 4%, 20.139 MiB/s, ETA 23s`.
+///    These are newline-terminated and stream live even when piped.
+///
+/// 2. `--stats-one-line` (legacy): rclone prefixes each line with
+///    "timestamp LEVEL:" (e.g. "2026/08/22 13:27:19 NOTICE:"), which we strip
+///    before parsing the comma-separated body.
 pub fn parse_rclone_stats(line: &str) -> Option<RcloneStats> {
     let line = line.trim();
+
+    // Fast reject: the stats body always carries "x / y" and a percentage.
     if !line.contains(" / ") || !line.contains('%') {
         return None;
     }
+
     let body = line
-        .split_once(':')
+        .split_once("NOTICE:")
+        .or_else(|| line.split_once("INFO:"))
+        .or_else(|| line.split_once("DEBUG:"))
+        .or_else(|| line.split_once("ERROR:"))
         .map(|(_, rest)| rest.trim())
         .unwrap_or(line);
     if !body.contains(" / ") {
         return None;
     }
+
     let mut parts = body.split(',');
     let sizes = parts.next()?.trim();
     let (done, total) = sizes.split_once('/')?;
-    let done = done.trim().to_string();
+    // `--progress` lines carry a leading `Transferred:` label; strip it so the
+    // gauge shows a clean byte amount instead of "Transferred: 512.000 MiB".
+    let done = done
+        .trim()
+        .strip_prefix("Transferred:")
+        .map(|s| s.trim())
+        .unwrap_or_else(|| done.trim())
+        .to_string();
     let total = total.trim().to_string();
 
     let pct = parts
         .next()
-        .and_then(|p| {
-            let p = p.trim().trim_end_matches('%');
-            p.parse::<u16>().ok()
-        })
+        .and_then(|p| p.trim().trim_end_matches('%').parse::<u16>().ok())
         .unwrap_or(0)
         .min(100);
 
@@ -208,6 +227,35 @@ mod tests {
         assert_eq!(s.pct, 50);
         assert_eq!(s.speed, "25.00 MiB/s");
         assert_eq!(s.eta, "20s");
+    }
+
+    #[test]
+    fn parses_rclone_progress_line_with_tabs() {
+        // real `rclone --progress` output when piped (non-TTY): the done column
+        // is padded with spaces and tabs after the `Transferred:` label.
+        let s = parse_rclone_stats(
+            "Transferred:   \t  20.141 MiB / 500 MiB, 4%, 20.139 MiB/s, ETA 23s",
+        )
+        .unwrap();
+        assert_eq!(s.done, "20.141 MiB");
+        assert_eq!(s.total, "500 MiB");
+        assert_eq!(s.pct, 4);
+        assert_eq!(s.speed, "20.139 MiB/s");
+        assert_eq!(s.eta, "23s");
+    }
+
+    #[test]
+    fn parses_rclone_stats_with_log_prefix() {
+        // real `rclone copy --stats-one-line --stats-log-level NOTICE` output
+        let s = parse_rclone_stats(
+            "2026/08/22 13:27:21 NOTICE:    13.996 MiB / 20 MiB, 70%, 5.497 MiB/s, ETA 1s",
+        )
+        .unwrap();
+        assert_eq!(s.done, "13.996 MiB");
+        assert_eq!(s.total, "20 MiB");
+        assert_eq!(s.pct, 70);
+        assert_eq!(s.speed, "5.497 MiB/s");
+        assert_eq!(s.eta, "1s");
     }
 
     #[test]
