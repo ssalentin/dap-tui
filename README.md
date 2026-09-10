@@ -34,6 +34,10 @@ cargo build --release
 ./target/release/dap-tui            # uses ~/.config/dap-sync/config.toml
 ./target/release/dap-tui --config /path/to/config.toml
 ./target/release/dap-tui --skip-mirror   # skip the StorageBox → local mirror step
+
+# install/update the `dap-tui` command (~/.cargo/bin) with the new build
+cargo install --path . --force
+dap-tui
 ```
 
 ## Keybindings
