@@ -258,7 +258,7 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
         .position(|s| s.status == StepStatus::Active)
         .unwrap_or(usize::MAX);
 
-    let (pct, done, total, speed, eta, current, label) = if active == 0 {
+    let (pct, done, total, speed, eta, current, listed, label) = if active == 0 {
         (
             state.mirror.pct,
             state.mirror.done.clone(),
@@ -266,6 +266,7 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
             state.mirror.speed.clone(),
             state.mirror.eta.clone(),
             state.mirror.current.clone(),
+            state.mirror.listed,
             "Mirroring local library",
         )
     } else if active == 1 {
@@ -276,20 +277,39 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
             state.device_prog.speed.clone(),
             state.device_prog.eta.clone(),
             state.device_prog.current.clone(),
+            0,
             "Syncing device",
         )
     } else {
-        (0, String::new(), String::new(), String::new(), String::new(), String::new(), "Finalizing")
+        (
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            "Finalizing",
+        )
     };
+
+    // With --check-first, rclone lists the whole remote before transferring:
+    // no bytes move yet, so show the scan instead of a meaningless 0% gauge.
+    let scanning = listed > 0 && (done.is_empty() || done == "0 B");
 
     let [gauge_row, stats] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
 
+    let gauge_label = if scanning {
+        format!(" Scanning remote  ·  {} items listed ", fmt_count(listed))
+    } else {
+        format!(" {label}  ·  {pct}% ")
+    };
     let g = Gauge::default()
         .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::BORDER)))
         .gauge_style(Style::default().fg(theme::ACCENT).bg(theme::BG_ALT))
         .ratio((pct as f64) / 100.0)
         .label(Span::styled(
-            format!(" {label}  ·  {pct}% "),
+            gauge_label,
             // No explicit colour: Gauge swaps fg/bg under the label so text
             // stays readable over both the filled and empty bar.
             Style::default().add_modifier(Modifier::BOLD),
@@ -309,6 +329,9 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
         if total.is_empty() { "…".to_string() } else { total },
         Style::default().fg(theme::CYAN),
     ));
+    if scanning {
+        left.push(Span::styled(" to transfer", Style::default().fg(theme::DIM)));
+    }
 
     let mut right: Vec<Span> = Vec::new();
     if !speed.is_empty() {
@@ -326,10 +349,15 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
     left.extend(right);
 
     let mut lines = vec![Line::from(left)];
+    let current_line = if scanning && current.is_empty() {
+        "building the file list…".to_string()
+    } else {
+        current.clone()
+    };
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            truncate(&current, inner.width.saturating_sub(2) as usize),
+            truncate(&current_line, inner.width.saturating_sub(2) as usize),
             Style::default().fg(theme::DIM),
         ),
     ]));
@@ -337,4 +365,17 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
         Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)),
         stats,
     );
+}
+
+/// `11810` → `11,810`
+fn fmt_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

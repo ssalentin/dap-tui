@@ -87,7 +87,10 @@ Firmware types: `apple` (podkit command), `rockbox`, `android`, `sony`
 ## How the sync pipeline works
 
 1. **Mirror** — `rclone sync` (or local `rsync`) pulls the StorageBox source
-   into the local library.
+   into the local library. rclone runs with `--check-first`, so the remote
+   listing completes before transfers start: the gauge then shows a true
+   overall percentage instead of the growing-total estimate, and the listing
+   phase is displayed as `Scanning remote · N items listed`.
 2. **Diff** — the device is scanned and compared to the source with
    NFC-normalised paths, size, and 2-second-rounded mtimes (FAT32 friendly).
 3. **Sync** — stale files are removed first, then `rsync --files-from` copies

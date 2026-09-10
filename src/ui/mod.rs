@@ -356,4 +356,43 @@ mod tests {
         assert!(out.contains("32.082 MiB"), "transferred bytes missing");
         assert!(out.contains("sub/file3.bin"), "current file missing");
     }
+
+    #[test]
+    fn renders_mirror_scanning_phase() {
+        use crate::engine::{StepState, StepStatus};
+
+        let mut app = test_app();
+        {
+            let mut s = app.engine.state.lock().unwrap();
+            s.running = true;
+            s.device = Some("Test Player".into());
+            s.steps = vec![
+                StepState {
+                    title: "Mirror StorageBox".into(),
+                    detail: "refreshing local library…".into(),
+                    status: StepStatus::Active,
+                },
+                StepState {
+                    title: "Sync Test Player".into(),
+                    detail: "rockbox · music".into(),
+                    status: StepStatus::Pending,
+                },
+            ];
+            // --check-first listing phase: no bytes moved, total still growing.
+            s.mirror.pct = 0;
+            s.mirror.done = "0 B".into();
+            s.mirror.total = "113.477 GiB".into();
+            s.mirror.listed = 11810;
+        }
+        app.tab = crate::app::Tab::Sync;
+
+        let out = render(&app, 100, 30);
+        assert!(out.contains("Scanning remote"), "scan label missing");
+        assert!(out.contains("11,810"), "listed count missing");
+        assert!(out.contains("113.477 GiB"), "pending total missing");
+        assert!(
+            !out.contains("Mirroring local library"),
+            "scan phase must replace the 0% mirror label"
+        );
+    }
 }

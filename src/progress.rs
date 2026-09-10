@@ -234,6 +234,16 @@ pub fn parse_rclone_stats(line: &str) -> Option<RcloneStats> {
     })
 }
 
+/// Parse the "Listed N" counter from an rclone `Checks:` progress line:
+/// `Checks:                 0 / 0, -, Listed 11810`.
+/// rclone prints this while scanning the remote tree (before `--check-first`
+/// lets any transfer start), so it is the only progress signal in that phase.
+pub fn parse_rclone_listed(line: &str) -> Option<u64> {
+    let (_, rest) = line.trim().split_once("Listed")?;
+    let n = rest.split_whitespace().next()?;
+    n.replace(',', "").parse().ok()
+}
+
 /// A size like `80 MiB` / `0 B` — but not a plain file count like `6`.
 fn has_size_unit(s: &str) -> bool {
     s.chars().any(|c| c.is_ascii_alphabetic())
@@ -337,6 +347,20 @@ mod tests {
         assert_eq!(s.pct, 40);
         assert_eq!(s.speed, "16.108 MiB/s");
         assert_eq!(s.eta, "2s");
+    }
+
+    #[test]
+    fn parses_rclone_listed_count() {
+        assert_eq!(
+            parse_rclone_listed("Checks:                 0 / 0, -, Listed 11810"),
+            Some(11810)
+        );
+        assert_eq!(
+            parse_rclone_listed("Checks:   5 / 10, 50%, Listed 1,234"),
+            Some(1234)
+        );
+        assert!(parse_rclone_listed("Transferred: 1 MiB / 2 MiB, 50%").is_none());
+        assert!(parse_rclone_listed("Elapsed time: 5.0s").is_none());
     }
 
     #[test]

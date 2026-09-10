@@ -1,5 +1,5 @@
 use crate::config::{self, Config, Device, Firmware};
-use crate::progress::{parse_rclone_current, parse_rclone_stats, parse_rsync_line, RsyncLine};
+use crate::progress::{parse_rclone_current, parse_rclone_listed, parse_rclone_stats, parse_rsync_line, RsyncLine};
 use chrono::Local;
 use std::collections::HashMap;
 use std::fs;
@@ -49,6 +49,9 @@ pub struct ProgressInfo {
     pub speed: String,
     pub eta: String,
     pub current: String,
+    /// rclone only: number of remote items listed so far (during the scan
+    /// phase before `--check-first` lets transfers start).
+    pub listed: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +136,13 @@ impl WorkerCtx {
     fn set_mirror_current(&self, path: &str) {
         if let Ok(mut s) = self.state.lock() {
             s.mirror.current = path.to_string();
+        }
+        self.changed();
+    }
+
+    fn set_mirror_listed(&self, listed: u64) {
+        if let Ok(mut s) = self.state.lock() {
+            s.mirror.listed = listed;
         }
         self.changed();
     }
@@ -420,15 +430,33 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
     // multi-line `Transferred: … / …, N%, speed, ETA …` block newline-terminated,
     // so it streams live through the pipe and we can update the gauge in real
     // time while a cloud→local mirror is running.
+    //
+    // `--check-first` completes the remote listing before any transfer starts.
+    // Without it (e.g. over SFTP) rclone lists while transferring, so the
+    // `Transferred:` total keeps growing and the percentage stuck near 0% —
+    // early ticks even showed a single file's percentage, which looked like
+    // per-album progress. With the full total known up front the gauge is a
+    // true overall percentage; the initial listing shows as a scan phase.
     args.extend(
-        ["--create-empty-src-dirs", "--progress", "--stats", "1s"]
-            .iter()
-            .map(|s| s.to_string()),
+        [
+            "--create-empty-src-dirs",
+            "--check-first",
+            "--progress",
+            "--stats",
+            "1s",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
     );
 
     stream(ctx, "rclone", &args, |line| {
         if let Some(p) = parse_rclone_stats(line) {
             ctx.set_mirror(p);
+            return true;
+        }
+        // `Checks: … Listed N` — the remote scan phase before transfers start.
+        if let Some(listed) = parse_rclone_listed(line) {
+            ctx.set_mirror_listed(listed);
             return true;
         }
         if let Some(file) = parse_rclone_current(line) {
@@ -943,6 +971,7 @@ mod tests {
         assert!(seen[0].contains("first stats line"));
         assert!(seen[1].contains("second stats line"));
     }
+
 
 
 
