@@ -155,46 +155,54 @@ pub struct RcloneStats {
     pub eta: String,
 }
 
-/// Parse a rclone stats line. Two shapes are supported:
+/// Parse a rclone `--progress` stats line. Two shapes are supported:
 ///
-/// 1. `--progress` (used by the engine): a `Transferred:` line such as
-///    `Transferred:\t  20.141 MiB / 500 MiB, 4%, 20.139 MiB/s, ETA 23s`.
+/// 1. `--progress` (used by the engine): the byte-weighted line
+///    `Transferred: \t 20.141 MiB / 500 MiB, 4%, 20.139 MiB/s, ETA 23s`.
 ///    These are newline-terminated and stream live even when piped.
 ///
 /// 2. `--stats-one-line` (legacy): rclone prefixes each line with
 ///    "timestamp LEVEL:" (e.g. "2026/08/22 13:27:19 NOTICE:"), which we strip
 ///    before parsing the comma-separated body.
+///
+/// The file-count summary (`Transferred: 0 / 6, 0%`) is deliberately rejected:
+/// rclone emits it right after the byte-weighted line on every stats tick, and
+/// accepting it reset the sync gauge to 0% each second. Likewise, rclone does
+/// not newline-terminate the last `Transferring:` entry, so the next stats line
+/// can arrive glued to a per-file line — we take the text after the last
+/// `Transferred:` marker.
 pub fn parse_rclone_stats(line: &str) -> Option<RcloneStats> {
     let line = line.trim();
-
-    // Fast reject: the stats body always carries "x / y" and a percentage.
-    if !line.contains(" / ") || !line.contains('%') {
+    if line.is_empty() {
         return None;
     }
 
-    let body = line
-        .split_once("NOTICE:")
-        .or_else(|| line.split_once("INFO:"))
-        .or_else(|| line.split_once("DEBUG:"))
-        .or_else(|| line.split_once("ERROR:"))
-        .map(|(_, rest)| rest.trim())
-        .unwrap_or(line);
-    if !body.contains(" / ") {
+    let body = match line.rsplit_once("Transferred:") {
+        Some((_, rest)) => rest.trim(),
+        None => line
+            .split_once("NOTICE:")
+            .or_else(|| line.split_once("INFO:"))
+            .or_else(|| line.split_once("DEBUG:"))
+            .or_else(|| line.split_once("ERROR:"))
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or(line),
+    };
+
+    // Fast reject: the stats body always carries "x / y" and a percentage.
+    if !body.contains(" / ") || !body.contains('%') {
         return None;
     }
 
     let mut parts = body.split(',');
     let sizes = parts.next()?.trim();
     let (done, total) = sizes.split_once('/')?;
-    // `--progress` lines carry a leading `Transferred:` label; strip it so the
-    // gauge shows a clean byte amount instead of "Transferred: 512.000 MiB".
-    let done = done
-        .trim()
-        .strip_prefix("Transferred:")
-        .map(|s| s.trim())
-        .unwrap_or_else(|| done.trim())
-        .to_string();
-    let total = total.trim().to_string();
+    let done = done.trim();
+    let total = total.trim();
+
+    // Reject anything without byte units (the `N / M` file-count summary).
+    if !has_size_unit(done) || !has_size_unit(total) {
+        return None;
+    }
 
     let pct = parts
         .next()
@@ -209,7 +217,33 @@ pub fn parse_rclone_stats(line: &str) -> Option<RcloneStats> {
         .map(|s| s.trim().trim_start_matches("ETA").trim().to_string())
         .unwrap_or_default();
 
-    Some(RcloneStats { done, total, pct, speed, eta })
+    Some(RcloneStats {
+        done: done.to_string(),
+        total: total.to_string(),
+        pct,
+        speed,
+        eta,
+    })
+}
+
+/// A size like `80 MiB` / `0 B` — but not a plain file count like `6`.
+fn has_size_unit(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// Parse a rclone `--progress` per-file transfer line and return the file path:
+/// ` *                                 sub/file3.bin: 51% / 8 MiB, 0 B/s, -`.
+/// The line may be glued to the following stats block, which is fine since only
+/// the part up to the first `:` is used.
+pub fn parse_rclone_current(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix('*')?;
+    let rest = rest.trim_start();
+    let (name, _stats) = rest.split_once(':')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 #[cfg(test)]
@@ -261,6 +295,87 @@ mod tests {
     #[test]
     fn rejects_non_stats_line() {
         assert!(parse_rclone_stats("Elapsed time:  5.0s").is_none());
+    }
+
+    #[test]
+    fn parses_live_rclone_progress_line() {
+        let s = parse_rclone_stats(
+            "Transferred:   \t   8.109 MiB / 80 MiB, 10%, 0 B/s, ETA -",
+        )
+        .unwrap();
+        assert_eq!(s.done, "8.109 MiB");
+        assert_eq!(s.total, "80 MiB");
+        assert_eq!(s.pct, 10);
+        assert_eq!(s.speed, "0 B/s");
+        assert_eq!(s.eta, "-");
+    }
+
+    #[test]
+    fn rejects_rclone_file_count_summary() {
+        // rclone prints this right after the byte line on every stats tick;
+        // accepting it used to reset the gauge to 0% each second.
+        assert!(parse_rclone_stats("Transferred:            0 / 6, 0%").is_none());
+        assert!(parse_rclone_stats("Transferred:            6 / 6, 100%").is_none());
+    }
+
+    #[test]
+    fn parses_stats_glued_to_per_file_line() {
+        // rclone does not newline-terminate the last `Transferring:` entry, so
+        // the next stats block starts on the same line.
+        let line = " *                                 sub/file3.bin: 51% / 8 MiB, 0 B/s, -Transferred:   \t   32.082 MiB / 80 MiB, 40%, 16.108 MiB/s, ETA 2s";
+        let s = parse_rclone_stats(line).unwrap();
+        assert_eq!(s.done, "32.082 MiB");
+        assert_eq!(s.total, "80 MiB");
+        assert_eq!(s.pct, 40);
+        assert_eq!(s.speed, "16.108 MiB/s");
+        assert_eq!(s.eta, "2s");
+    }
+
+    #[test]
+    fn parses_rclone_current_file() {
+        assert_eq!(
+            parse_rclone_current(
+                " *                                 sub/file3.bin: 51% / 8 MiB, 0 B/s, -"
+            )
+            .unwrap(),
+            "sub/file3.bin"
+        );
+        assert_eq!(
+            parse_rclone_current(" *  big.bin:  5% / 40 MiB, 2.059 MiB/s, 18s").unwrap(),
+            "big.bin"
+        );
+        assert!(parse_rclone_current("Transferred: 1 MiB / 2 MiB, 50%, 1 MiB/s, ETA 1s").is_none());
+        assert!(parse_rclone_current(" * ").is_none());
+    }
+
+    #[test]
+    fn survives_real_rclone_progress_blocks() {
+        // Captured from `rclone sync --progress --stats 1s` with a pipe: the
+        // byte line is followed by the unit-less file-count summary, and the
+        // last `Transferring:` entry is not newline-terminated, so the next
+        // byte line is glued to it. The byte progress must survive both.
+        let sample = "\
+Transferred:   \t   8.109 MiB / 80 MiB, 10%, 0 B/s, ETA -
+Checks:                 0 / 0, -, Listed 7
+Transferred:            0 / 6, 0%
+Elapsed time:         1.0s
+Transferring:
+ *                                       big.bin:  5% / 40 MiB, 2.059 MiB/s, 18s
+ *                                 sub/file1.bin: 25% / 8 MiB, 2.058 MiB/s, 2s
+ *                                 sub/file3.bin: 51% / 8 MiB, 0 B/s, -Transferred:   \t   32.082 MiB / 80 MiB, 40%, 16.108 MiB/s, ETA 2s
+Checks:                 0 / 0, -, Listed 7
+Transferred:            2 / 6, 33%
+";
+        let mut last: Option<RcloneStats> = None;
+        for line in sample.lines() {
+            if let Some(p) = parse_rclone_stats(line) {
+                last = Some(p);
+            }
+        }
+        let last = last.expect("byte stats must parse");
+        assert_eq!(last.pct, 40);
+        assert_eq!(last.done, "32.082 MiB");
+        assert_eq!(last.total, "80 MiB");
     }
 
     #[test]

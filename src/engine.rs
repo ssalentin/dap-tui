@@ -1,5 +1,5 @@
 use crate::config::{self, Config, Device, Firmware};
-use crate::progress::{parse_rclone_stats, parse_rsync_line, RsyncLine};
+use crate::progress::{parse_rclone_current, parse_rclone_stats, parse_rsync_line, RsyncLine};
 use chrono::Local;
 use std::collections::HashMap;
 use std::fs;
@@ -126,6 +126,13 @@ impl WorkerCtx {
             s.mirror.total = p.total;
             s.mirror.speed = p.speed;
             s.mirror.eta = p.eta;
+        }
+        self.changed();
+    }
+
+    fn set_mirror_current(&self, path: &str) {
+        if let Ok(mut s) = self.state.lock() {
+            s.mirror.current = path.to_string();
         }
         self.changed();
     }
@@ -422,11 +429,26 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
     stream(ctx, "rclone", &args, |line| {
         if let Some(p) = parse_rclone_stats(line) {
             ctx.set_mirror(p);
-            true
-        } else {
-            false
+            return true;
         }
+        if let Some(file) = parse_rclone_current(line) {
+            // Per-file `Transferring:` entry — show it as the current file
+            // instead of logging it once per second.
+            ctx.set_mirror_current(&file);
+            return true;
+        }
+        // Remaining progress-block lines (Checks/Elapsed/Transferring, and the
+        // `Transferred: 0 / 6` file-count summary) would otherwise spam the log.
+        is_rclone_progress_noise(line)
     })
+}
+
+fn is_rclone_progress_noise(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("Checks:")
+        || line.starts_with("Elapsed time:")
+        || line.starts_with("Transferring:")
+        || line.starts_with("Transferred:")
 }
 
 // ── step 2: device sync ───────────────────────────────────────────────────────

@@ -183,4 +183,41 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn renders_live_cloud_mirror_progress() {
+        use crate::engine::{StepState, StepStatus};
+
+        let mut app = test_app();
+        {
+            let mut s = app.engine.state.lock().unwrap();
+            s.running = true;
+            s.device = Some("Test Player".into());
+            s.steps = vec![
+                StepState {
+                    title: "Mirror StorageBox".into(),
+                    detail: "refresh local library".into(),
+                    status: StepStatus::Active,
+                },
+                StepState {
+                    title: "Sync Test Player".into(),
+                    detail: "rockbox · music".into(),
+                    status: StepStatus::Pending,
+                },
+            ];
+            s.mirror.pct = 40;
+            s.mirror.done = "32.082 MiB".into();
+            s.mirror.total = "80 MiB".into();
+            s.mirror.speed = "16.108 MiB/s".into();
+            s.mirror.eta = "2s".into();
+            s.mirror.current = "sub/file3.bin".into();
+        }
+        app.tab = crate::app::Tab::Sync;
+
+        let out = render(&app, 100, 30);
+        assert!(out.contains("Mirroring local library"), "mirror label missing");
+        assert!(out.contains("40%"), "percentage missing");
+        assert!(out.contains("32.082 MiB"), "transferred bytes missing");
+        assert!(out.contains("sub/file3.bin"), "current file missing");
+    }
 }
