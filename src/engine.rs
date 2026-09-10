@@ -542,29 +542,43 @@ fn scan_music_dir(base: &Path) -> HashMap<String, (u64, i64)> {
 }
 
 fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
-    let mount = device
+    let configured = device
         .mount_point
         .as_ref()
         .ok_or_else(|| "mount_point is not set for this device".to_string())?;
 
-    if !crate::disk::is_mounted(mount) {
-        ctx.log(
-            LogLevel::Info,
-            format!("device not mounted at {} — trying udisksctl…", mount.display()),
-        );
-        match crate::udisks::mount_device(mount) {
-            Ok(msg) => ctx.log(LogLevel::Info, format!("auto-mounted: {msg}")),
-            Err(e) => {
-                return Err(format!(
-                    "device not mounted at {} — connect & mount it (m) and retry. {e}",
-                    mount.display()
-                ));
+    // Trust the kernel mount table over the configured path: udisks may have
+    // mounted the volume at a suffixed path (e.g. /media/.../IPOD1) because the
+    // configured directory already existed.
+    let mount = match crate::disk::mounted_path_for(configured) {
+        Some(p) => p,
+        None => {
+            ctx.log(
+                LogLevel::Info,
+                format!(
+                    "device not mounted at {} — trying udisksctl…",
+                    configured.display()
+                ),
+            );
+            match crate::udisks::mount_device(configured) {
+                Ok(msg) => ctx.log(LogLevel::Info, format!("auto-mounted: {msg}")),
+                Err(e) => {
+                    return Err(format!(
+                        "device not mounted at {} — connect & mount it (m) and retry. {e}",
+                        configured.display()
+                    ));
+                }
             }
+            crate::disk::mounted_path_for(configured).ok_or_else(|| {
+                format!(
+                    "auto-mount of {} did not yield a mount point",
+                    configured.display()
+                )
+            })?
         }
-    }
-    // A leftover (empty) mount-point directory must not be mistaken for a
-    // mounted device — rsync would otherwise happily fill the root filesystem.
-    if !crate::disk::is_mounted(mount) {
+    };
+    // Paranoia: never write into a directory that is not actually a mount.
+    if !crate::disk::is_mounted(&mount) {
         return Err(format!(
             "{} exists but is not a mount point — refusing to sync. Connect the device and press 'm'.",
             mount.display()
@@ -732,15 +746,17 @@ fn capture(cmd: &str, args: &[&str]) -> Result<(i32, String), String> {
 }
 
 fn finalize_fat(device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
-    let mount = device
+    let configured = device
         .mount_point
         .as_ref()
         .ok_or_else(|| "mount_point is required to run fatsort".to_string())?;
+    // Use the actual mount point in case udisks moved it to a suffixed path.
+    let mount = crate::disk::mounted_path_for(configured).unwrap_or_else(|| configured.clone());
 
-    let target = resolve_fatsort_target(mount)?;
+    let target = resolve_fatsort_target(&mount)?;
 
     ctx.log(LogLevel::Info, format!("Unmounting {mount_display}", mount_display = mount.display()));
-    match crate::udisks::unmount_device(mount) {
+    match crate::udisks::unmount_device(&mount) {
         Ok(msg) => ctx.log(LogLevel::Info, format!("unmounted: {msg}")),
         Err(e) => {
             // fall back to sudo for setups without udisks
@@ -770,6 +786,12 @@ fn finalize_fat(device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
 fn resolve_fatsort_target(mount: &Path) -> Result<String, String> {
     if !mount.is_dir() {
         return Ok(mount.display().to_string());
+    }
+    // Never let findmnt fall back to the parent filesystem (e.g. the root
+    // disk) when the directory is not actually a mount point — fatsort on the
+    // wrong block device would corrupt it.
+    if !crate::disk::is_mounted(mount) {
+        return Err(format!("{} is not a mount point", mount.display()));
     }
     let (code, out) = capture(
         "findmnt",

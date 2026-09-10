@@ -107,9 +107,12 @@ mounts the target first (resolved by mount-point label via `lsblk`). Only the
 mlove `fatsort` step needs root (raw block device).
 
 Mount status and sync targets are validated against the kernel mount table
-(`/proc/self/mountinfo`), not just directory existence: if the configured
-`mount_point` exists but is not actually mounted, `dap-tui` refuses to sync to
-it rather than writing the library onto the root filesystem.
+(`/proc/self/mountinfo`), not just directory existence. The configured
+`mount_point` is a hint: if udisks mounted the volume at a suffixed sibling
+because the configured directory already existed (e.g. `IPOD` → `IPOD1`),
+dap-tui follows the actual mount and uses it as the sync destination. If the
+path exists but is not a mount at all, syncing into it is refused rather than
+writing the library onto the root filesystem.
 
 ## Development
 

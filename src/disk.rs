@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whether `path` is currently a mount point.
 ///
@@ -24,6 +24,56 @@ pub fn is_mounted(path: &Path) -> bool {
 
     // Fallback for platforms without /proc: best effort only.
     path.exists()
+}
+
+/// Mount points currently listed in the kernel mount table.
+fn mount_points() -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") {
+        return text
+            .lines()
+            .filter_map(|line| line.split(' ').nth(4))
+            .map(|field| PathBuf::from(unescape_octal(field)))
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Where the volume configured at `path` is actually mounted.
+///
+/// udisks mounts a volume at `/media/$USER/$LABEL`; if that directory already
+/// exists (e.g. a leftover mount dir after an unclean eject) it appends a
+/// number, so `/media/sebastian/IPOD` becomes `/media/sebastian/IPOD1`. This
+/// resolves the exact path or the lowest-numbered suffixed sibling, so the
+/// configured path is treated as a hint rather than a hard requirement.
+pub fn mounted_path_for(path: &Path) -> Option<PathBuf> {
+    if is_mounted(path) {
+        return Some(path.to_path_buf());
+    }
+    let parent = path.parent()?;
+    let base = path.file_name()?.to_string_lossy().to_string();
+    mount_points()
+        .into_iter()
+        .filter_map(|mp| mount_suffix_rank(parent, &base, &mp).map(|rank| (rank, mp)))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, mp)| mp)
+}
+
+/// Rank of a mount point relative to a configured path: 0 for an exact match,
+/// `n` for `name{n}` (udisks' uniquifying suffix), `None` otherwise.
+fn mount_suffix_rank(parent: &Path, base: &str, candidate: &Path) -> Option<u32> {
+    if candidate.parent() != Some(parent) {
+        return None;
+    }
+    let name = candidate.file_name()?.to_string_lossy();
+    let rest = name.strip_prefix(base)?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    if rest.chars().all(|c| c.is_ascii_digit()) {
+        return rest.parse().ok();
+    }
+    None
 }
 
 /// Undo the octal escaping (`\040` etc.) used by /proc mount tables.
@@ -84,7 +134,31 @@ pub fn fmt_bytes(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_bytes, unescape_octal};
+    use super::{fmt_bytes, mounted_path_for, mount_suffix_rank, unescape_octal};
+
+    #[test]
+    fn ranks_udisks_suffixed_mounts() {
+        let parent = std::path::Path::new("/media/sebastian");
+        let rank = |c: &str| mount_suffix_rank(parent, "IPOD", std::path::Path::new(c));
+        assert_eq!(rank("/media/sebastian/IPOD"), Some(0));
+        assert_eq!(rank("/media/sebastian/IPOD1"), Some(1));
+        assert_eq!(rank("/media/sebastian/IPOD12"), Some(12));
+        // non-numeric suffixes and other directories must not match
+        assert_eq!(rank("/media/sebastian/IPODX"), None);
+        assert_eq!(rank("/media/sebastian/IPOD-2"), None);
+        assert_eq!(rank("/media/other/IPOD1"), None);
+        assert_eq!(rank("/media/sebastian/IPOD1/extra"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn resolves_exact_mounts() {
+        // `/` is always mounted; mounted_path_for must return it unchanged.
+        assert_eq!(
+            mounted_path_for(std::path::Path::new("/")),
+            Some(std::path::PathBuf::from("/"))
+        );
+    }
 
     #[test]
     fn unescapes_mountinfo_paths() {

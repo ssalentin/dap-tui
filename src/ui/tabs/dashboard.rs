@@ -147,11 +147,14 @@ fn draw_device_card(f: &mut Frame, area: Rect, app: &App, device: &crate::config
         line("last sync", last, last_style),
     ];
 
-    // Mounted storage usage. The compact value ("276.8 GiB free · 39%") fits
-    // the card width, unlike the old "459.5 GiB total · 276.8 GiB free" which
-    // was truncated mid-number.
+    // Mounted storage usage. udisks may mount the volume at a suffixed path
+    // (IPOD → IPOD1), so report stats for wherever it actually is mounted.
+    let actual_mount = device
+        .mount_point
+        .as_deref()
+        .and_then(crate::disk::mounted_path_for);
     let storage = if device.mounted {
-        device.mount_point.as_ref().and_then(|p| disk_stats(p))
+        actual_mount.as_deref().and_then(disk_stats)
     } else {
         None
     };
@@ -232,7 +235,12 @@ fn draw_settings_card(f: &mut Frame, area: Rect, device: &crate::config::Device)
         Style::default().fg(theme::FG),
     ));
     match device.mount_point.as_deref() {
-        Some(p) => lines.push(path_kv(l_mount, p, value_w, lw)),
+        Some(p) => {
+            // Show where it is actually mounted when udisks used a suffixed
+            // path (e.g. the configured IPOD dir existed, so it chose IPOD1).
+            let shown = crate::disk::mounted_path_for(p).unwrap_or_else(|| p.to_path_buf());
+            lines.push(path_kv(l_mount, &shown, value_w, lw));
+        }
         None => lines.push(line(l_mount, "—".to_string(), Style::default().fg(theme::DIM))),
     }
     lines.push(line(

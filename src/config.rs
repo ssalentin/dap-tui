@@ -122,12 +122,14 @@ pub struct Config {
 
 impl Config {
     /// Refresh `Device::mounted` from the kernel mount table (no subprocess).
+    /// A device counts as mounted when its volume is mounted at the configured
+    /// path or at a udisks-suffixed sibling (e.g. `IPOD` → `IPOD1`).
     pub fn refresh_mounts(&mut self) {
         for d in self.devices.iter_mut() {
             d.mounted = d
                 .mount_point
                 .as_deref()
-                .map(crate::disk::is_mounted)
+                .map(|p| crate::disk::mounted_path_for(p).is_some())
                 .unwrap_or(false);
         }
     }
