@@ -193,6 +193,14 @@ pub fn parse_rclone_stats(line: &str) -> Option<RcloneStats> {
         return None;
     }
 
+    // A real byte-stats body starts with the transferred amount. This rejects
+    // per-file `Transferring` entries such as
+    // `*  a.bin: 25% / 60 MiB, 0 B/s, -`, which rclone emits right after the
+    // byte line on every tick. They used to parse as 0% and reset the gauge.
+    if !body.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+
     let mut parts = body.split(',');
     let sizes = parts.next()?.trim();
     let (done, total) = sizes.split_once('/')?;
@@ -349,6 +357,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_rclone_per_file_lines() {
+        // Emitted every tick right after the byte line; must never reset the
+        // gauge to 0%.
+        assert!(parse_rclone_stats(
+            " *                                         a.bin: 25% / 60 MiB, 0 B/s, -"
+        )
+        .is_none());
+        assert!(parse_rclone_stats("*  big.bin:  5% / 40 MiB, 2.059 MiB/s, 18s").is_none());
+        // The glued variant still has to yield the trailing stats block.
+        let glued = "*  a.bin: 25% / 60 MiB, 0 B/s, -Transferred:   \t   60.086 MiB / 120 MiB, 50%, 30.041 MiB/s, ETA 1s";
+        assert_eq!(parse_rclone_stats(glued).unwrap().pct, 50);
+    }
+
+    #[test]
     fn survives_real_rclone_progress_blocks() {
         // Captured from `rclone sync --progress --stats 1s` with a pipe: the
         // byte line is followed by the unit-less file-count summary, and the
@@ -366,14 +388,16 @@ Transferring:
 Checks:                 0 / 0, -, Listed 7
 Transferred:            2 / 6, 33%
 ";
-        let mut last: Option<RcloneStats> = None;
+        // Only the two byte lines may parse; every per-file or count line must
+        // be rejected, so the gauge can never snap back to 0 between ticks.
+        let mut pcts = Vec::new();
         for line in sample.lines() {
             if let Some(p) = parse_rclone_stats(line) {
-                last = Some(p);
+                pcts.push(p.pct);
             }
         }
-        let last = last.expect("byte stats must parse");
-        assert_eq!(last.pct, 40);
+        assert_eq!(pcts, vec![10, 40]);
+        let last = parse_rclone_stats(sample.lines().nth(7).unwrap()).unwrap();
         assert_eq!(last.done, "32.082 MiB");
         assert_eq!(last.total, "80 MiB");
     }
