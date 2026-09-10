@@ -1,4 +1,5 @@
 use crate::app::{relative_ago, App, Tab};
+use crate::config::Firmware;
 use crate::engine::{LogLevel, StepStatus};
 use crate::ui::theme;
 use crate::ui::truncate;
@@ -6,7 +7,63 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+
+// ── shared panel chrome ───────────────────────────────────────────────────────
+
+/// Rounded card with the accent title used by every tab, so all panels share
+/// exactly one look.
+pub fn panel(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(Style::default().bg(theme::PANEL_BG))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// Colour per firmware family, used for the firmware tag/chip.
+pub fn firmware_color(fw: &Firmware) -> ratatui::style::Color {
+    match fw {
+        Firmware::Rockbox => theme::MAGENTA,
+        Firmware::Android => theme::CYAN,
+        Firmware::Mlove => theme::ORANGE,
+        Firmware::Sony => theme::GREEN,
+        Firmware::Apple => theme::YELLOW,
+    }
+}
+
+/// Highlighted inline chip like `[storagebox:backup/masters]`.
+pub fn chip(text: &str) -> Span<'static> {
+    Span::styled(
+        format!(" [{text}]"),
+        Style::default()
+            .fg(theme::BG)
+            .bg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// Arrow between two chips: ` ─rsync▶ `.
+pub fn arrow(label: &str) -> Span<'static> {
+    Span::styled(format!(" ─{label}▶ "), Style::default().fg(theme::CYAN))
+}
+
+/// A small key hint, e.g. ` s `, for inline "press …" prompts.
+pub fn key_hint(key: &str) -> Span<'static> {
+    Span::styled(
+        format!(" {key} "),
+        Style::default()
+            .fg(theme::BG)
+            .bg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    )
+}
 
 // ── title bar ─────────────────────────────────────────────────────────────────
 
@@ -20,30 +77,37 @@ pub fn draw_title(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("device sync", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-        Span::raw("   "),
         Span::styled(
-            "StorageBox  →  local  →  player",
-            Style::default().fg(theme::DIM),
+            "StorageBox",
+            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ),
+        Span::styled("  →  ", Style::default().fg(theme::DIM)),
+        Span::styled("local", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+        Span::styled("  →  ", Style::default().fg(theme::DIM)),
+        Span::styled("player", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
     ];
 
     let mut right_spans = vec![
+        Span::styled(
+            if app.skip_mirror { "mirror off" } else { "mirror on" },
+            Style::default().fg(if app.skip_mirror {
+                theme::YELLOW
+            } else {
+                theme::DIM
+            }),
+        ),
+        Span::raw("   "),
         Span::styled(
             if app.is_syncing() {
                 format!("{} syncing", app.spinner())
             } else {
                 "● ready".to_string()
             },
-            Style::default().fg(if app.is_syncing() { theme::CYAN } else { theme::GREEN }),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            truncate(
-                &app.config.config_file.display().to_string(),
-                (area.width.max(9) - 8) as usize,
-            ),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(if app.is_syncing() {
+                theme::CYAN
+            } else {
+                theme::GREEN
+            }),
         ),
     ];
 
@@ -90,7 +154,7 @@ pub fn draw_rule(f: &mut Frame, area: Rect, _app: &App) {
 pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(theme::DIM))
+        .border_style(Style::default().fg(theme::BORDER))
         .style(Style::default().bg(theme::BG_ALT))
         .title(Span::styled(
             "  DEVICES  ",
@@ -177,10 +241,10 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App, syncing: bool) {
         };
         let selected = idx == app.selected;
 
+        // Soft selection: highlight background + accent marker instead of
+        // flooding both rows with the full accent colour.
         let row_style = if selected {
-            Style::default()
-                .bg(theme::ACCENT)
-                .fg(theme::BG)
+            Style::default().bg(theme::SELECTION_BG).fg(theme::FG)
         } else {
             Style::default().bg(theme::BG_ALT).fg(theme::FG)
         };
@@ -189,15 +253,12 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App, syncing: bool) {
         // status icon
         let is_this = sync_device.as_ref().map(|d| d == &device.name).unwrap_or(false);
         if is_this {
-            // dark on the accent selection, bright cyan on the dark unselected row
-            let spinner_style = if selected {
-                Style::default().fg(theme::BG).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)
-            };
-            spans.push(Span::styled(app.spinner().to_string(), spinner_style));
+            spans.push(Span::styled(
+                app.spinner().to_string(),
+                Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+            ));
         } else if device.mounted {
-            spans.push(Span::styled("●", Style::default().fg(if selected { theme::BG } else { theme::GREEN })));
+            spans.push(Span::styled("●", Style::default().fg(theme::GREEN)));
         } else {
             spans.push(Span::styled("○", Style::default().fg(theme::DIM)));
         }
@@ -207,8 +268,17 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App, syncing: bool) {
         let marker = if selected { "▸ " } else { "  " };
         let name = truncate(&device.name, (row.width as usize).saturating_sub(8));
         spans.push(Span::styled(
-            format!("{marker}{name}"),
-            Style::default().add_modifier(if selected { Modifier::BOLD } else { Modifier::default() }),
+            marker,
+            Style::default()
+                .fg(theme::ACCENT)
+                .bg(if selected { theme::SELECTION_BG } else { theme::BG_ALT })
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            name,
+            Style::default()
+                .fg(theme::FG)
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::default() }),
         ));
 
         f.render_widget(Paragraph::new(Line::from(spans)).style(row_style), *row);
@@ -224,18 +294,19 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App, syncing: bool) {
         } else {
             format!("  {} · {}", device.firmware.label(), device.content_type)
         };
-        let sub_style = if selected {
-            Style::default().bg(theme::ACCENT).fg(theme::BG)
-        } else {
-            Style::default().bg(theme::BG_ALT).fg(theme::DIM)
-        };
+        let sub_style = Style::default()
+            .bg(if selected { theme::SELECTION_BG } else { theme::BG_ALT })
+            .fg(theme::DIM);
         let row2 = Rect {
             y: row.y + 1,
             ..*row
         };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(truncate(&sub, row.width.max(1) as usize), sub_style)))
-                .style(sub_style),
+            Paragraph::new(Line::from(Span::styled(
+                truncate(&sub, row.width.max(1) as usize),
+                sub_style,
+            )))
+            .style(sub_style),
             row2,
         );
     }

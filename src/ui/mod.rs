@@ -26,7 +26,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     let v = Layout::vertical([
-        Constraint::Length(2), // title
+        Constraint::Length(1), // title
         Constraint::Length(1), // gradient rule
         Constraint::Min(0),    // body
         Constraint::Length(1), // status
@@ -37,7 +37,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     components::draw_title(f, title, app);
     components::draw_rule(f, rule, app);
 
-    let [side, main] = Layout::horizontal([Constraint::Length(34), Constraint::Min(0)]).areas(body);
+    let [side, main] = Layout::horizontal([
+        Constraint::Length(if area.width < 100 { 28 } else { 34 }),
+        Constraint::Min(0),
+    ])
+    .areas(body);
     components::draw_sidebar(f, side, app);
     draw_main(f, main, app);
 
@@ -182,6 +186,138 @@ mod tests {
                 assert!(out.contains("quit"), "last help entry clipped at {w}x{h}");
             }
         }
+    }
+
+    #[allow(dead_code)]
+    fn ui_sample_app() -> App {
+        use chrono::Duration as CDuration;
+        let now = chrono::Local::now();
+        let dev = |name: &str, fw: Firmware, mounted: bool, mount: &str, ago: i64, status: &str| Device {
+            name: name.into(),
+            firmware: fw,
+            content_type: if name.contains("Mlove") { "hoerspiele" } else { "music" }.into(),
+            sync_command: "podkit sync -c main".into(),
+            mount_point: Some(PathBuf::from(mount)),
+            music_folder: "Music".into(),
+            preserve_fat_order: false,
+            mounted,
+            last_sync: if ago >= 0 { Some(now - CDuration::minutes(ago)) } else { None },
+            last_status: status.into(),
+        };
+        let config = Config {
+            config_file: PathBuf::from("~/.config/dap-sync/config.toml"),
+            local_music_dir: PathBuf::from("/home/sebastian/music"),
+            local_hoerspiele_dir: PathBuf::from("/home/sebastian/hoerspiele"),
+            output_dir: PathBuf::from("/home/sebastian/.local/share/dap-sync"),
+            storagebox_source: "storagebox:backup/masters".into(),
+            storagebox_hoerspiele_source: "/home/sebastian/storagebox/hoerspiele".into(),
+            storagebox_excludes: vec!["/Music/**".into(), ".DS_Store".into(), ".localized".into()],
+            devices: vec![
+                dev("iPod Rockbox", Firmware::Rockbox, true, "/", 42, "ok"),
+                dev("Hifi Walker H2", Firmware::Rockbox, false, "/media/sebastian/ROCKBOX", 1440, "ok"),
+                dev("ffiom21", Firmware::Android, false, "/media/sebastian/FIIOM21", -1, ""),
+                dev("Sony NW-A55", Firmware::Sony, false, "/media/sebastian/SD_CARD", 2880, "error"),
+                dev("Mlove Player", Firmware::Mlove, false, "/media/sebastian/MLOVE", 10080, "ok"),
+            ],
+        };
+        App::new(config, false).unwrap()
+    }
+
+    fn dump_frame(app: &App, name: &str) {
+        dump_frame_sized(app, name, 120, 34);
+    }
+
+    fn dump_frame_sized(app: &App, name: &str, w: u16, h: u16) {
+        println!("\n===== {name} =====");
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..h {
+            let mut line = String::new();
+            for x in 0..w {
+                line.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            println!("{}", line.trim_end());
+        }
+    }
+
+    #[test]
+    #[ignore = "dev helper: cargo test dump_ui -- --ignored --nocapture"]
+    fn dump_ui() {
+        use crate::engine::{LogEntry, LogLevel, StepState, StepStatus};
+
+        let mut app = ui_sample_app();
+        app.logs.push(LogEntry {
+            level: LogLevel::Info,
+            msg: "── Starting sync for iPod Rockbox".into(),
+            ts: chrono::Local::now(),
+        });
+        app.logs.push(LogEntry {
+            level: LogLevel::Transfer,
+            msg: "Artist/Album/track01.m4a".into(),
+            ts: chrono::Local::now(),
+        });
+        app.logs.push(LogEntry {
+            level: LogLevel::Error,
+            msg: "rsync failed (exit 23)".into(),
+            ts: chrono::Local::now(),
+        });
+
+        app.tab = crate::app::Tab::Dashboard;
+        dump_frame(&app, "DASHBOARD");
+
+        app.tab = crate::app::Tab::Sync;
+        dump_frame(&app, "SYNC / READY");
+
+        {
+            let mut s = app.engine.state.lock().unwrap();
+            s.running = true;
+            s.device = Some("iPod Rockbox".into());
+            s.steps = vec![
+                StepState {
+                    title: "Mirror StorageBox".into(),
+                    detail: "local library refreshed".into(),
+                    status: StepStatus::Done,
+                },
+                StepState {
+                    title: "Sync iPod Rockbox".into(),
+                    detail: "copying 12 file(s)…".into(),
+                    status: StepStatus::Active,
+                },
+                StepState {
+                    title: "Finalize FAT".into(),
+                    detail: "unmount + fatsort".into(),
+                    status: StepStatus::Pending,
+                },
+            ];
+            s.device_prog.pct = 42;
+            s.device_prog.done = "1.2 GiB".into();
+            s.device_prog.total = "2.9 GiB".into();
+            s.device_prog.speed = "18.4 MiB/s".into();
+            s.device_prog.eta = "1m 30s".into();
+            s.device_prog.current = "Artist/Album/track07.flac".into();
+        }
+        dump_frame(&app, "SYNC / RUNNING");
+
+        {
+            let mut s = app.engine.state.lock().unwrap();
+            s.running = false;
+            s.result = Some(true);
+            s.summary = "Sync complete".into();
+            s.steps[1].status = StepStatus::Done;
+            s.steps[1].detail = "device synced".into();
+            s.steps[2].status = StepStatus::Done;
+            s.steps[2].detail = "device ejected & sorted".into();
+        }
+        dump_frame(&app, "SYNC / FINISHED");
+
+        app.tab = crate::app::Tab::Logs;
+        dump_frame(&app, "LOGS");
+
+        app.tab = crate::app::Tab::Sync;
+        dump_frame_sized(&app, "SYNC / FINISHED 80x24", 80, 24);
+        app.tab = crate::app::Tab::Dashboard;
+        dump_frame_sized(&app, "DASHBOARD 80x24", 80, 24);
     }
 
     #[test]

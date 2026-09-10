@@ -1,25 +1,13 @@
 use crate::app::App;
 use crate::engine::{StepState, StepStatus, SyncState};
-use crate::ui::components::step_icon;
+use crate::ui::components::{firmware_color, key_hint, panel, step_icon};
 use crate::ui::theme;
 use crate::ui::truncate;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, Gauge, Paragraph};
-
-fn panel(title: &str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::DIM))
-        .style(Style::default().bg(theme::PANEL_BG))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-        ))
-}
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let state = app.engine.state.lock().unwrap().clone();
@@ -48,7 +36,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     );
 
     if !state.running {
-        draw_idle(f, body, &state, app);
+        if state.steps.is_empty() {
+            draw_ready(f, body, app);
+        } else {
+            draw_finished(f, body, &state, app);
+        }
         return;
     }
 
@@ -58,69 +50,155 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     draw_progress(f, progress, &state);
 }
 
-fn draw_idle(f: &mut Frame, area: Rect, state: &SyncState, _app: &App) {
-    let [info, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(area);
-
-    let block = panel("LAST SYNC");
-    let inner = block.inner(info);
-    f.render_widget(block, info);
-
-    let mut lines: Vec<Line> = Vec::new();
-    if let Some(ok) = state.result {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                if ok { "✓" } else { "✗" },
-                Style::default().fg(if ok { theme::GREEN } else { theme::RED }).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(state.summary.clone(), Style::default().fg(theme::FG)),
-        ]));
-    } else {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "No sync has been run yet.",
-                Style::default().fg(theme::DIM),
-            ),
-        ]));
-    }
-    if let Some(name) = &state.device {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Press ", Style::default().fg(theme::DIM)),
-            Span::styled(" s ", Style::default().fg(theme::BG).bg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" to sync {name}"), Style::default().fg(theme::DIM)),
-        ]));
-    }
-    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
-
-    let hint_block = panel("PIPELINE");
-    let hint_inner = hint_block.inner(hint);
-    f.render_widget(hint_block, hint);
+/// Horizontally centered, vertically centered block of lines.
+fn center_lines(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    let pad = area.height.saturating_sub(lines.len() as u16) / 2;
+    let mut content: Vec<Line> = vec![Line::raw(""); pad as usize];
+    content.extend(lines);
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled("1 ", Style::default().fg(theme::ACCENT)),
-                Span::styled("rclone sync", Style::default().fg(theme::FG)),
-                Span::styled("  →  ", Style::default().fg(theme::DIM)),
-                Span::styled("2 ", Style::default().fg(theme::ACCENT)),
-                Span::styled("NFC diff", Style::default().fg(theme::FG)),
-                Span::styled("  →  ", Style::default().fg(theme::DIM)),
-                Span::styled("3 ", Style::default().fg(theme::ACCENT)),
-                Span::styled("rsync", Style::default().fg(theme::FG)),
-                Span::styled("  →  ", Style::default().fg(theme::DIM)),
-                Span::styled("4 ", Style::default().fg(theme::ACCENT)),
-                Span::styled("eject / fatsort", Style::default().fg(theme::FG)),
-            ]),
-        ])
-        .style(Style::default().bg(theme::PANEL_BG)),
-        hint_inner,
+        Paragraph::new(content)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme::PANEL_BG)),
+        area,
     );
+}
+
+/// Idle state before the first sync of this session: a hero panel for the
+/// selected device plus the pipeline description.
+fn draw_ready(f: &mut Frame, area: Rect, app: &App) {
+    let [hero, pipeline] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+
+    let block = panel("READY TO SYNC");
+    let inner = block.inner(hero);
+    f.render_widget(block, hero);
+
+    let Some(device) = app.selected_device() else {
+        center_lines(
+            f,
+            inner,
+            vec![
+                Line::from(Span::styled(
+                    "No device selected",
+                    Style::default()
+                        .fg(theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Add [[devices]] entries to config.toml, then press r",
+                    Style::default().fg(theme::DIM),
+                )),
+            ],
+        );
+        draw_pipeline(f, pipeline);
+        return;
+    };
+
+    let (mount, mount_style) = if device.mounted {
+        ("● mounted", Style::default().fg(theme::GREEN))
+    } else {
+        ("○ not mounted", Style::default().fg(theme::RED))
+    };
+    let last = match device.last_sync {
+        Some(dt) if device.last_status == "ok" => {
+            format!("{} · ok", crate::app::relative_ago(dt))
+        }
+        Some(dt) => format!("{} · error", crate::app::relative_ago(dt)),
+        None => "never synced".to_string(),
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            truncate(&device.name, inner.width.saturating_sub(4) as usize),
+            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(
+                device.firmware.label().to_string(),
+                Style::default()
+                    .fg(firmware_color(&device.firmware))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ·  ", Style::default().fg(theme::DIM)),
+            Span::styled(device.content_type.clone(), Style::default().fg(theme::FG)),
+            Span::styled("  ·  ", Style::default().fg(theme::DIM)),
+            Span::styled(mount, mount_style),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("press", Style::default().fg(theme::DIM)),
+            key_hint("s"),
+            Span::styled("to sync this device", Style::default().fg(theme::DIM)),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("last sync {last}"),
+            Style::default().fg(theme::DIM),
+        )),
+    ];
+    center_lines(f, inner, lines);
+    draw_pipeline(f, pipeline);
+}
+
+fn draw_pipeline(f: &mut Frame, area: Rect) {
+    let block = panel("PIPELINE");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let line = Line::from(vec![
+        Span::styled(" 1 ", Style::default().fg(theme::ACCENT)),
+        Span::styled("rclone sync", Style::default().fg(theme::FG)),
+        Span::styled("  →  ", Style::default().fg(theme::DIM)),
+        Span::styled("2 ", Style::default().fg(theme::ACCENT)),
+        Span::styled("NFC diff", Style::default().fg(theme::FG)),
+        Span::styled("  →  ", Style::default().fg(theme::DIM)),
+        Span::styled("3 ", Style::default().fg(theme::ACCENT)),
+        Span::styled("rsync", Style::default().fg(theme::FG)),
+        Span::styled("  →  ", Style::default().fg(theme::DIM)),
+        Span::styled("4 ", Style::default().fg(theme::ACCENT)),
+        Span::styled("eject / fatsort", Style::default().fg(theme::FG)),
+    ]);
+    f.render_widget(
+        Paragraph::new(vec![Line::raw(""), line])
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme::PANEL_BG)),
+        inner,
+    );
+}
+
+/// After a sync finished: keep the final step timeline visible instead of
+/// discarding it and showing only an empty "last sync" card.
+fn draw_finished(f: &mut Frame, area: Rect, state: &SyncState, app: &App) {
+    let [result, steps] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+
+    let ok = state.result.unwrap_or(false);
+    let block = panel("LAST RUN");
+    let inner = block.inner(result);
+    f.render_widget(block, result);
+
+    let (icon, color) = if ok {
+        ("✓", theme::GREEN)
+    } else {
+        ("✗", theme::RED)
+    };
+    let device = state.device.clone().unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(
+                state.summary.clone(),
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("   {device}"), Style::default().fg(theme::DIM)),
+        ]))
+        .style(Style::default().bg(theme::PANEL_BG)),
+        inner,
+    );
+
+    draw_steps(f, steps, state, app);
 }
 
 fn draw_steps(f: &mut Frame, area: Rect, state: &SyncState, app: &App) {
@@ -130,9 +208,23 @@ fn draw_steps(f: &mut Frame, area: Rect, state: &SyncState, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
-    for step in &state.steps {
+    for (i, step) in state.steps.iter().enumerate() {
         lines.push(step_line(step, app));
+        if i + 1 < state.steps.len() {
+            // timeline connector between the step icons
+            lines.push(Line::from(Span::styled(
+                "  │",
+                Style::default().fg(theme::BORDER),
+            )));
+        }
+    }
+    if !state.running {
         lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            key_hint("s"),
+            Span::styled(" run again", Style::default().fg(theme::DIM)),
+        ]));
     }
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
@@ -193,12 +285,14 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
     let [gauge_row, stats] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
 
     let g = Gauge::default()
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::DIM)))
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::BORDER)))
         .gauge_style(Style::default().fg(theme::ACCENT).bg(theme::BG_ALT))
         .ratio((pct as f64) / 100.0)
         .label(Span::styled(
             format!(" {label}  ·  {pct}% "),
-            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            // No explicit colour: Gauge swaps fg/bg under the label so text
+            // stays readable over both the filled and empty bar.
+            Style::default().add_modifier(Modifier::BOLD),
         ));
     f.render_widget(g, gauge_row);
 

@@ -15,7 +15,11 @@ living dashboard instead of a batch CLI.
   last-sync age per device.
 - **3 tabs** — Dashboard (per-player overview + settings, storage usage when
   mounted, library + sync pipeline), Sync (live step pipeline + progress
-  gauge), Logs (color-coded, follow mode).
+  gauge with speed/ETA, timeline of the last run), Logs (color-coded, follow
+  mode, warning/error counters).
+- **Responsive layout** — short terminals drop the decorative sync-path card,
+  narrow cards switch to compact labels/values and ellipsize long paths
+  instead of clipping them mid-word.
 - **Live sync engine** — streams `rclone` and `rsync` output, parses progress
   (byte-weighted via `--info=progress2`), NFC-aware diffing for
   macOS→FAT32/Android devices, optional `fatsort` finalize for Mlove devices.

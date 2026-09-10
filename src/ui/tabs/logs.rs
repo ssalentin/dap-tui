@@ -35,19 +35,44 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "follow off".to_string()
     };
-    let head_line = Line::from(vec![
+    let warns = app
+        .logs
+        .iter()
+        .filter(|e| matches!(e.level, LogLevel::Warn))
+        .count();
+    let errors = app
+        .logs
+        .iter()
+        .filter(|e| matches!(e.level, LogLevel::Error))
+        .count();
+    let mut head_spans = vec![
         Span::styled(
             format!("  {} log entries", app.logs.len()),
             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  ·  "),
         Span::styled(follow_tag, Style::default().fg(theme::DIM)),
-        Span::raw("  ·  "),
-        Span::styled(
-            "f toggle · u/d scroll · x clear",
-            Style::default().fg(theme::DIM),
-        ),
-    ]);
+    ];
+    if warns > 0 {
+        head_spans.push(Span::raw("  ·  "));
+        head_spans.push(Span::styled(
+            format!("{warns} warning{}", if warns == 1 { "" } else { "s" }),
+            Style::default().fg(theme::YELLOW),
+        ));
+    }
+    if errors > 0 {
+        head_spans.push(Span::raw("  ·  "));
+        head_spans.push(Span::styled(
+            format!("{errors} error{}", if errors == 1 { "" } else { "s" }),
+            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        ));
+    }
+    head_spans.push(Span::raw("  ·  "));
+    head_spans.push(Span::styled(
+        "f toggle · u/d scroll · x clear",
+        Style::default().fg(theme::DIM),
+    ));
+    let head_line = Line::from(head_spans);
     f.render_widget(
         Paragraph::new(head_line).style(Style::default().bg(theme::BG)),
         head,
@@ -56,7 +81,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::DIM))
+        .border_style(Style::default().fg(theme::BORDER))
         .style(Style::default().bg(theme::PANEL_BG));
     let inner = block.inner(body);
     f.render_widget(block, body);

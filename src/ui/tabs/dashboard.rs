@@ -1,41 +1,51 @@
 use crate::app::{relative_ago, App};
 use crate::config::Firmware;
 use crate::disk::{disk_stats, fmt_bytes};
+use crate::ui::components::{arrow, chip, firmware_color, panel};
 use crate::ui::theme;
 use crate::ui::truncate;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph};
+use ratatui::widgets::Paragraph;
 
-fn card(title: &str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::DIM))
-        .style(Style::default().bg(theme::PANEL_BG))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-        ))
-}
-
-fn kv<'a>(label: &str, value: String, value_style: Style) -> Line<'a> {
+fn kv_w<'a>(label: &str, value: String, value_style: Style, label_w: usize) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("  {label:<14}"), Style::default().fg(theme::DIM)),
+        Span::styled(format!("  {label:<label_w$}"), Style::default().fg(theme::DIM)),
         Span::styled(value, value_style),
     ])
 }
 
-fn firmware_color(fw: &Firmware) -> ratatui::style::Color {
-    match fw {
-        Firmware::Rockbox => theme::MAGENTA,
-        Firmware::Android => theme::CYAN,
-        Firmware::Mlove => theme::ORANGE,
-        Firmware::Sony => theme::GREEN,
-        Firmware::Apple => theme::YELLOW,
-    }
+/// `age` shortened for narrow cards (`42m ago` → `42m`).
+fn short_ago(dt: chrono::DateTime<chrono::Local>) -> String {
+    relative_ago(dt).trim_end_matches(" ago").to_string()
+}
+
+/// A `kv` line whose value is a filesystem path, marking whether it exists.
+fn path_kv<'a>(
+    label: &str,
+    path: &std::path::Path,
+    max_value: usize,
+    label_w: usize,
+) -> Line<'a> {
+    let (mark, mark_style) = if path.exists() {
+        ("✓", Style::default().fg(theme::GREEN))
+    } else {
+        ("✗", Style::default().fg(theme::RED))
+    };
+    Line::from(vec![
+        Span::styled(format!("  {label:<label_w$}"), Style::default().fg(theme::DIM)),
+        Span::styled(format!("{mark} "), mark_style),
+        Span::styled(
+            // the mark + space take two columns of the value budget
+            truncate(
+                &path.display().to_string(),
+                max_value.saturating_sub(2).max(4),
+            ),
+            Style::default().fg(theme::FG),
+        ),
+    ])
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
@@ -44,12 +54,24 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let [row1, row2, chain] = Layout::vertical([
-        Constraint::Min(9),
-        Constraint::Min(8),
-        Constraint::Length(4),
-    ])
-    .areas(area);
+    // Three stacked rows normally; drop the decorative SYNC PATH card when the
+    // terminal is too short for all cards to keep a content row.
+    let (row1, row2, chain) = if area.height >= 19 {
+        let [r1, r2, ch] = Layout::vertical([
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .areas(area);
+        (r1, r2, Some(ch))
+    } else {
+        let [r1, r2] = Layout::vertical([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .areas(area);
+        (r1, r2, None)
+    };
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)]).areas(row1);
@@ -61,33 +83,55 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     draw_library_card(f, lib, app);
     draw_sync_status_card(f, status, app);
 
-    draw_chain(f, chain, app, device);
+    if let Some(chain) = chain {
+        draw_chain(f, chain, app, device);
+    }
 }
 
 fn draw_device_card(f: &mut Frame, area: Rect, app: &App, device: &crate::config::Device) {
-    let block = card("DEVICE");
+    let block = panel("DEVICE");
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    let narrow = inner.width < 34;
+    let lw = if narrow { 10 } else { 14 };
+    let value_w = (inner.width as usize).saturating_sub(2 + lw).max(4);
+    let line = |label: &str, value: String, style: Style| {
+        kv_w(label, truncate(&value, value_w), style, lw)
+    };
 
     let name = truncate(&device.name, inner.width.saturating_sub(6) as usize);
     let fw = device.firmware.label().to_string();
     let fw_color = firmware_color(&device.firmware);
 
-    let status = if device.mounted {
-        Span::styled("● mounted", Style::default().fg(theme::GREEN))
+    let (status, status_style) = if device.mounted {
+        (
+            if narrow { "● on" } else { "● mounted" },
+            Style::default().fg(theme::GREEN),
+        )
     } else {
-        Span::styled("○ not mounted", Style::default().fg(theme::RED))
+        (
+            if narrow { "○ off" } else { "○ not mounted" },
+            Style::default().fg(theme::RED),
+        )
     };
 
-    let last = match device.last_sync {
-        Some(dt) => {
-            if device.last_status == "ok" {
-                format!("{} (ok)", relative_ago(dt))
-            } else {
-                format!("{} (error)", relative_ago(dt))
-            }
-        }
-        None => "never".to_string(),
+    let (last, last_style) = match device.last_sync {
+        Some(dt) if device.last_status == "ok" => (
+            format!(
+                "{} · ok",
+                if narrow { short_ago(dt) } else { relative_ago(dt) }
+            ),
+            Style::default().fg(theme::GREEN),
+        ),
+        Some(dt) => (
+            format!(
+                "{} · error",
+                if narrow { short_ago(dt) } else { relative_ago(dt) }
+            ),
+            Style::default().fg(theme::RED),
+        ),
+        None => ("never".to_string(), Style::default().fg(theme::DIM)),
     };
 
     let mut lines: Vec<Line> = vec![
@@ -99,156 +143,181 @@ fn draw_device_card(f: &mut Frame, area: Rect, app: &App, device: &crate::config
                 Style::default().fg(fw_color).add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  status", Style::default().fg(theme::DIM)),
-            Span::raw("         "),
-            status,
-        ]),
-        kv("last sync", last, Style::default().fg(theme::YELLOW)),
+        line("status", status.to_string(), status_style),
+        line("last sync", last, last_style),
     ];
 
-    // mounted storage usage (total / available)
+    // Mounted storage usage. The compact value ("276.8 GiB free · 39%") fits
+    // the card width, unlike the old "459.5 GiB total · 276.8 GiB free" which
+    // was truncated mid-number.
     let storage = if device.mounted {
         device.mount_point.as_ref().and_then(|p| disk_stats(p))
     } else {
         None
     };
 
-    if let Some(stats) = storage {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled("  storage", Style::default().fg(theme::DIM)),
-            Span::raw("       "),
-            Span::styled(
-                format!(
-                    "{} total · {} free",
-                    fmt_bytes(stats.total),
-                    fmt_bytes(stats.available)
-                ),
-                Style::default().fg(theme::CYAN),
-            ),
-        ]));
-    }
-    let _ = app;
-    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
-
-    // storage usage gauge underneath
+    let mut pct = 0u16;
     if let Some(stats) = storage {
         let used = stats.total.saturating_sub(stats.available);
-        let pct = if stats.total > 0 {
-            (used as f64 / stats.total as f64 * 100.0) as u16
+        pct = if stats.total > 0 {
+            (used as f64 / stats.total as f64 * 100.0).round() as u16
         } else {
             0
         };
-        let gauge_area = Rect {
-            y: inner.y + inner.height.saturating_sub(1),
-            x: inner.x,
-            width: inner.width,
-            height: 1,
+        let value = if narrow {
+            format!("{pct}% used")
+        } else {
+            format!("{} free · {}%", fmt_bytes(stats.available), pct)
         };
-        f.render_widget(
-            ratatui::widgets::Gauge::default()
-                .gauge_style(Style::default().fg(theme::ACCENT).bg(theme::BG_ALT))
-                .ratio((pct as f64) / 100.0)
-                .label(Span::styled(
-                    format!(" {pct}% used "),
-                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
-                )),
-            gauge_area,
-        );
+        lines.push(line("storage", value, Style::default().fg(theme::CYAN)));
+    }
+
+    let _ = app;
+    let content_h = lines.len() as u16;
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
+
+    // Usage bar on its own row, only when the card is tall enough that it
+    // cannot collide with the text above.
+    if let Some(stats) = storage {
+        if inner.height >= content_h + 2 {
+            let used = stats.total.saturating_sub(stats.available);
+            let ratio = if stats.total > 0 {
+                used as f64 / stats.total as f64
+            } else {
+                0.0
+            };
+            let bar_area = Rect {
+                y: inner.y + inner.height.saturating_sub(1),
+                x: inner.x + 1,
+                width: inner.width.saturating_sub(2),
+                height: 1,
+            };
+            f.render_widget(
+                ratatui::widgets::Gauge::default()
+                    .gauge_style(Style::default().fg(theme::ACCENT).bg(theme::BG_ALT))
+                    .ratio(ratio.clamp(0.0, 1.0))
+                    .label(Span::styled(
+                        format!(" {pct}% used "),
+                        // No explicit colour: Gauge swaps fg/bg under the label so
+                        // text stays readable over both the filled and empty bar.
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                bar_area,
+            );
+        }
     }
 }
 
 fn draw_settings_card(f: &mut Frame, area: Rect, device: &crate::config::Device) {
-    let block = card("PLAYER SETTINGS");
+    let block = panel("PLAYER SETTINGS");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut lines: Vec<Line> = vec![Line::raw("")];
-    lines.push(kv(
-        "content type",
+    let narrow = inner.width < 34;
+    let lw = if narrow { 8 } else { 14 };
+    let value_w = (inner.width as usize).saturating_sub(2 + lw).max(4);
+    let line = |label: &str, value: String, style: Style| {
+        kv_w(label, truncate(&value, value_w), style, lw)
+    };
+    let (l_content, l_mount, l_folder, l_fat) = if narrow {
+        ("content", "mount", "folder", "fat")
+    } else {
+        ("content type", "mount point", "music folder", "fat order")
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(line(
+        l_content,
         device.content_type.clone(),
         Style::default().fg(theme::FG),
     ));
-    lines.push(kv(
-        "mount point",
-        device.mount_str(),
-        Style::default().fg(theme::CYAN),
-    ));
-    lines.push(kv(
-        "music folder",
+    match device.mount_point.as_deref() {
+        Some(p) => lines.push(path_kv(l_mount, p, value_w, lw)),
+        None => lines.push(line(l_mount, "—".to_string(), Style::default().fg(theme::DIM))),
+    }
+    lines.push(line(
+        l_folder,
         device.music_folder.clone(),
         Style::default().fg(theme::CYAN),
     ));
-    lines.push(kv(
-        "fat order",
+    lines.push(line(
+        l_fat,
         if device.preserve_fat_order { "yes".into() } else { "no".into() },
         Style::default().fg(if device.preserve_fat_order { theme::YELLOW } else { theme::DIM }),
     ));
     if device.firmware == Firmware::Apple {
-        lines.push(kv(
-            "sync command",
-            truncate(&device.sync_command, inner.width.saturating_sub(18) as usize),
+        lines.push(line(
+            if narrow { "cmd" } else { "sync command" },
+            device.sync_command.clone(),
             Style::default().fg(theme::MAGENTA),
         ));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
+        Span::raw("  "),
         Span::styled(
-            "  edit ~/.config/dap-sync/config.toml",
-            Style::default().fg(theme::DIM),
+            "r",
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" reloads config.toml", Style::default().fg(theme::DIM)),
     ]));
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 
 fn draw_library_card(f: &mut Frame, area: Rect, app: &App) {
-    let block = card("LIBRARY");
+    let block = panel("LIBRARY");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let excludes = app.config.storagebox_excludes.len();
-    let lines = vec![
+    let narrow = inner.width < 34;
+    let lw = if narrow { 12 } else { 14 };
+    let value_w = (inner.width as usize).saturating_sub(2 + lw).max(4);
+    let mut lines = vec![
+        path_kv("music", &app.config.local_music_dir, value_w, lw),
+        path_kv("hoerspiele", &app.config.local_hoerspiele_dir, value_w, lw),
         Line::raw(""),
-        kv(
-            "music",
-            app.config.local_music_dir.display().to_string(),
-            Style::default().fg(theme::CYAN),
-        ),
-        kv(
-            "hoerspiele",
-            app.config.local_hoerspiele_dir.display().to_string(),
-            Style::default().fg(theme::CYAN),
-        ),
-        Line::raw(""),
-        kv(
-            "storagebox",
-            app.config.storagebox_source.clone(),
-            Style::default().fg(theme::FG),
-        ),
-        kv(
-            "source hsp",
-            app.config.storagebox_hoerspiele_source.clone(),
-            Style::default().fg(theme::FG),
-        ),
-        kv(
-            "excludes",
-            format!("{excludes} patterns"),
-            Style::default().fg(theme::DIM),
-        ),
-        Line::raw(""),
-        kv(
-            "output",
-            app.config.output_dir.display().to_string(),
-            Style::default().fg(theme::DIM),
-        ),
     ];
+    let source_kv = |label: &str, source: &str, lines: &mut Vec<Line>| {
+        let path = std::path::Path::new(source);
+        if path.is_absolute() {
+            lines.push(path_kv(label, path, value_w, lw));
+        } else {
+            lines.push(kv_w(
+                label,
+                truncate(source, value_w),
+                Style::default().fg(theme::FG),
+                lw,
+            ));
+        }
+    };
+    source_kv("storagebox", &app.config.storagebox_source, &mut lines);
+    source_kv(
+        "source hsp",
+        &app.config.storagebox_hoerspiele_source,
+        &mut lines,
+    );
+    lines.push(kv_w(
+        "excludes",
+        format!("{excludes} patterns"),
+        Style::default().fg(theme::DIM),
+        lw,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(kv_w(
+        "output",
+        truncate(&app.config.output_dir.display().to_string(), value_w),
+        Style::default().fg(theme::DIM),
+        lw,
+    ));
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 
 fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
-    let block = card("SYNC STATUS");
+    let block = panel("SYNC STATUS");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -263,13 +332,19 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
     let mut ok = 0usize;
     let mut err = 0usize;
     let mut never = 0usize;
+    // Narrow cards get time-only statuses so the device name keeps its space.
+    let compact = inner.width < 34;
 
     let mut lines: Vec<Line> = Vec::new();
     for device in &app.config.devices {
         let is_syncing = sync_device.as_ref().map(|d| d == &device.name).unwrap_or(false);
         let status_span: Span = if is_syncing {
             Span::styled(
-                format!("{} syncing…", app.spinner()),
+                if compact {
+                    format!("{} sync", app.spinner())
+                } else {
+                    format!("{} syncing…", app.spinner())
+                },
                 Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD),
             )
         } else if let Some(dt) = device.last_sync {
@@ -277,13 +352,13 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
             if device.last_status == "ok" {
                 ok += 1;
                 Span::styled(
-                    format!("✓ ok · {ago}"),
+                    if compact { format!("✓ {ago}") } else { format!("✓ ok · {ago}") },
                     Style::default().fg(theme::GREEN),
                 )
             } else {
                 err += 1;
                 Span::styled(
-                    format!("✗ error · {ago}"),
+                    if compact { format!("✗ {ago}") } else { format!("✗ error · {ago}") },
                     Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
                 )
             }
@@ -292,7 +367,10 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("— never", Style::default().fg(theme::DIM))
         };
 
-        let name = truncate(&device.name, inner.width.saturating_sub(26).max(4) as usize);
+        let name_w = (inner.width as usize)
+            .saturating_sub(5 + status_span.width())
+            .max(4);
+        let name = truncate(&device.name, name_w);
         let mut spans: Vec<Span> = vec![Span::raw("  "), Span::styled(name, Style::default().fg(theme::FG))];
         let used: usize = spans.iter().map(|s| s.width()).sum();
         let left = (inner.width as usize).saturating_sub(2 + status_span.width());
@@ -303,24 +381,23 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
 
-    // summary footer
+    // summary footer (two compact lines — the one-line variant used to end in
+    // an ugly "…" because the card is narrow)
     lines.push(Line::raw(""));
-    let summary = format!(
-        "  {ok} ok · {err} error · {never} never · last {last}",
-        last = app
-            .config
-            .devices
-            .iter()
-            .filter_map(|d| d.last_sync)
-            .min_by_key(|dt| {
-                let s = now.signed_duration_since(*dt).num_seconds();
-                s.max(0)
-            })
-            .map(|dt| relative_ago(dt))
-            .unwrap_or_else(|| "—".to_string()),
-    );
     lines.push(Line::from(Span::styled(
-        truncate(&summary, inner.width as usize),
+        format!("  {ok} ok · {err} err · {never} never"),
+        Style::default().fg(theme::DIM),
+    )));
+    let last = app
+        .config
+        .devices
+        .iter()
+        .filter_map(|d| d.last_sync)
+        .min_by_key(|dt| now.signed_duration_since(*dt).num_seconds().max(0))
+        .map(relative_ago)
+        .unwrap_or_else(|| "—".to_string());
+    lines.push(Line::from(Span::styled(
+        format!("  last sync {last}"),
         Style::default().fg(theme::DIM),
     )));
 
@@ -328,7 +405,7 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_chain(f: &mut Frame, area: Rect, app: &App, device: &crate::config::Device) {
-    let block = card("SYNC PATH");
+    let block = panel("SYNC PATH");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -361,19 +438,8 @@ fn draw_chain(f: &mut Frame, area: Rect, app: &App, device: &crate::config::Devi
     );
 }
 
-fn chip(text: &str) -> Span<'static> {
-    Span::styled(
-        format!(" [{text}]"),
-        Style::default().fg(theme::BG).bg(theme::ACCENT).add_modifier(Modifier::BOLD),
-    )
-}
-
-fn arrow(label: &str) -> Span<'static> {
-    Span::styled(format!(" ─{label}▶ "), Style::default().fg(theme::CYAN))
-}
-
 fn draw_empty(f: &mut Frame, area: Rect) {
-    let block = card("DEVICE");
+    let block = panel("DEVICE");
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(

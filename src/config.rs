@@ -108,15 +108,6 @@ pub struct Device {
     pub last_status: String,
 }
 
-impl Device {
-    pub fn mount_str(&self) -> String {
-        match &self.mount_point {
-            Some(p) => p.display().to_string(),
-            None => "—".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub config_file: PathBuf,
