@@ -48,6 +48,9 @@ pub struct App {
     pub logs: Vec<crate::engine::LogEntry>,
     pub log_follow: bool,
     pub log_scroll: usize,
+    /// Height of the log viewport as last rendered (used to scroll from the
+    /// bottom when leaving follow mode).
+    pub log_view: std::cell::Cell<usize>,
 
     pub frame: u64,
     pub should_quit: bool,
@@ -68,6 +71,7 @@ impl App {
             logs: Vec::new(),
             log_follow: true,
             log_scroll: 0,
+            log_view: std::cell::Cell::new(0),
             frame: 0,
             should_quit: false,
             show_help: false,
@@ -88,16 +92,6 @@ impl App {
         self.engine.running()
     }
 
-    fn refresh_mounts(&mut self) {
-        for d in self.config.devices.iter_mut() {
-            d.mounted = d
-                .mount_point
-                .as_ref()
-                .map(|p| p.exists())
-                .unwrap_or(false);
-        }
-    }
-
     fn drain_engine(&mut self) {
         while let Ok(ev) = self.engine.events.try_recv() {
             match ev {
@@ -116,9 +110,17 @@ impl App {
                     }
                 }
                 EngineEvent::Changed => {}
-                EngineEvent::Finished { ok, summary } => {
+                EngineEvent::Finished { device, ok, summary } => {
+                    // Refresh in-memory last-sync state so the dashboard shows
+                    // the run that just finished instead of the stale time
+                    // loaded at startup (the engine already persisted it).
+                    if let Some(d) = self.config.devices.iter_mut().find(|d| d.name == device) {
+                        d.last_sync = Some(chrono::Local::now());
+                        d.last_status = if ok { "ok" } else { "error" }.to_string();
+                    }
+                    self.config.refresh_mounts();
                     let level = if ok { LogLevel::Success } else { LogLevel::Error };
-                    self.status_msg = Some((summary.clone(), level));
+                    self.status_msg = Some((summary, level));
                 }
             }
         }
@@ -170,7 +172,7 @@ impl App {
                 self.status_msg = Some((format!("{action} failed — {e}"), LogLevel::Error));
             }
         }
-        self.refresh_mounts();
+        self.config.refresh_mounts();
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -203,10 +205,7 @@ impl App {
             KeyCode::Char('s') | KeyCode::Enter => self.start_sync(),
             KeyCode::Char('a') => self.abort_sync(),
             KeyCode::Char('m') => self.toggle_mount(),
-            KeyCode::Char('r') => {
-                self.refresh_mounts();
-                self.status_msg = Some(("devices refreshed".to_string(), LogLevel::Info));
-            }
+            KeyCode::Char('r') => self.reload_config(),
             KeyCode::Char('f') => {
                 self.log_follow = !self.log_follow;
                 self.log_scroll = 0;
@@ -236,25 +235,60 @@ impl App {
     }
 
     fn ensure_selection_visible(&mut self) {
-        const VISIBLE: usize = 12;
+        // Sidebar rows available: terminal height − title(2) − rule(1) −
+        // status(1) − keys(1) − sidebar head/foot(2), in 2-line device rows.
+        let visible = ratatui::crossterm::terminal::size()
+            .map(|(_, h)| ((h.saturating_sub(7) / 2).max(1)) as usize)
+            .unwrap_or(12);
         if self.selected < self.sidebar_scroll {
             self.sidebar_scroll = self.selected;
         }
-        if self.selected >= self.sidebar_scroll + VISIBLE {
-            self.sidebar_scroll = self.selected + 1 - VISIBLE;
+        if self.selected >= self.sidebar_scroll + visible {
+            self.sidebar_scroll = self.selected + 1 - visible;
         }
     }
 
     fn scroll_logs(&mut self, delta: i32) {
-        self.log_follow = false;
+        if self.log_follow {
+            // Already pinned to the bottom: scrolling further down is a no-op,
+            // while scrolling up must start from the bottom of the buffer
+            // instead of jumping back to the top of the log.
+            if delta > 0 {
+                return;
+            }
+            let page = self.log_view.get().max(1);
+            self.log_scroll = self.logs.len().saturating_sub(page);
+            self.log_follow = false;
+        }
         let max = self.logs.len().saturating_sub(1) as i32;
         self.log_scroll = ((self.log_scroll as i32 + delta).clamp(0, max)) as usize;
+    }
+
+    fn reload_config(&mut self) {
+        let path = self.config.config_file.display().to_string();
+        match crate::config::load(Some(path)) {
+            Ok(cfg) => {
+                self.config = cfg;
+                if self.selected >= self.config.devices.len() {
+                    self.selected = self.config.devices.len().saturating_sub(1);
+                }
+                self.sidebar_scroll = 0;
+                self.ensure_selection_visible();
+                self.status_msg = Some((
+                    "config reloaded · devices refreshed".to_string(),
+                    LogLevel::Info,
+                ));
+            }
+            Err(e) => {
+                self.status_msg = Some((format!("config reload failed — {e}"), LogLevel::Error));
+            }
+        }
     }
 
     fn tick(&mut self) {
         self.frame += 1;
         if self.frame % 30 == 0 {
-            self.refresh_mounts();
+            self.config.refresh_mounts();
         }
         if self.is_syncing() {
             let aborted = self.engine.abort.load(Ordering::Relaxed);
@@ -282,6 +316,15 @@ impl App {
             }
             Ok(())
         })();
+        // Never leave a sync child process orphaned when the user quits:
+        // request an abort and give the engine a moment to terminate it.
+        if self.engine.running() {
+            self.engine.abort_sync();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while self.engine.running() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         ratatui::restore();
         res
     }

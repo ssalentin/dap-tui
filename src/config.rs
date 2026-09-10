@@ -130,12 +130,13 @@ pub struct Config {
 }
 
 impl Config {
-    fn refresh_mounts(&mut self) {
+    /// Refresh `Device::mounted` from the kernel mount table (no subprocess).
+    pub fn refresh_mounts(&mut self) {
         for d in self.devices.iter_mut() {
             d.mounted = d
                 .mount_point
-                .as_ref()
-                .map(|p| p.exists())
+                .as_deref()
+                .map(crate::disk::is_mounted)
                 .unwrap_or(false);
         }
     }

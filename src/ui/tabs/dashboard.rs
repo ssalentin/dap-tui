@@ -295,7 +295,7 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
         let name = truncate(&device.name, inner.width.saturating_sub(26).max(4) as usize);
         let mut spans: Vec<Span> = vec![Span::raw("  "), Span::styled(name, Style::default().fg(theme::FG))];
         let used: usize = spans.iter().map(|s| s.width()).sum();
-        let left = inner.width as usize - 2 - status_span.width();
+        let left = (inner.width as usize).saturating_sub(2 + status_span.width());
         if used < left {
             spans.push(Span::raw(" ".repeat(left - used)));
         }

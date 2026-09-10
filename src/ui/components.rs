@@ -205,7 +205,7 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App, syncing: bool) {
 
         // selection marker + name
         let marker = if selected { "▸ " } else { "  " };
-        let name = truncate(&device.name, row.width.max(1) as usize - 8);
+        let name = truncate(&device.name, (row.width as usize).saturating_sub(8));
         spans.push(Span::styled(
             format!("{marker}{name}"),
             Style::default().add_modifier(if selected { Modifier::BOLD } else { Modifier::default() }),
@@ -358,7 +358,7 @@ pub fn draw_keys(f: &mut Frame, area: Rect, _app: &App) {
         ("a", "abort"),
         ("m", "mount"),
         ("Tab/1-3", "tab"),
-        ("r", "refresh"),
+        ("r", "reload"),
         ("f", "follow"),
         ("?", "help"),
         ("q", "quit"),

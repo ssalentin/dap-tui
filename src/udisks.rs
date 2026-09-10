@@ -19,7 +19,10 @@ fn run(cmd: &str, args: &[&str]) -> (bool, String) {
 }
 
 fn resolve_block_device(path: &Path) -> Option<String> {
-    if path.is_dir() {
+    // Only trust findmnt when the path really is a mount point; otherwise
+    // findmnt happily reports the containing filesystem (e.g. /), which would
+    // make us "mount" the root device.
+    if crate::disk::is_mounted(path) {
         let (ok, out) = run("findmnt", &["-n", "-o", "SOURCE", "-T", path.to_str()?]);
         if ok {
             let src = out.trim();
@@ -29,20 +32,31 @@ fn resolve_block_device(path: &Path) -> Option<String> {
         }
     }
     let wanted = path.file_name()?.to_string_lossy().to_lowercase();
-    let (ok, out) = run("lsblk", &["-o", "PATH,LABEL", "-n", "-l"]);
+    let (ok, out) = run("lsblk", &["-o", "PATH,LABEL", "-n", "-l", "-P"]);
     if !ok {
         return None;
     }
     for line in out.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(dev) = parts.next() else { continue };
-        if let Some(label) = parts.next() {
-            if !label.is_empty() && label.to_lowercase() == wanted {
-                return Some(dev.to_string());
-            }
+        let Some(dev) = field(line, "PATH") else {
+            continue;
+        };
+        let Some(label) = field(line, "LABEL") else {
+            continue;
+        };
+        if !label.is_empty() && label.to_lowercase() == wanted {
+            return Some(dev);
         }
     }
     None
+}
+
+/// Extract a `KEY="value"` field from `lsblk -P` output.
+fn field(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 pub fn mount_device(path: &Path) -> Result<String, String> {

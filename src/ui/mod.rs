@@ -5,10 +5,11 @@ pub mod theme;
 use crate::app::App;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Style, Stylize};
-use ratatui::widgets::{Block, Borders, Clear};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
 
-use theme::{BG, DIM};
+use theme::BG;
 
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -60,47 +61,126 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_help(f: &mut Frame) {
+    let entries: &[(&str, &str)] = &[
+        ("↑↓ / j k", "move selection"),
+        ("s / Enter", "sync selected device"),
+        ("a", "abort running sync"),
+        ("m", "mount / unmount device (udisks)"),
+        ("Tab / 1-3", "switch tab"),
+        ("r", "reload config · refresh mounts"),
+        ("f", "toggle log follow"),
+        ("u / d", "scroll logs"),
+        ("x", "clear logs"),
+        ("? / h", "this help"),
+        ("q / Esc", "quit"),
+    ];
+
     let area = f.area();
-    let box_w = 58;
-    let box_h = 16;
-    let x = (area.width.saturating_sub(box_w)) / 2;
-    let y = (area.height.saturating_sub(box_h)) / 2;
-    let rect = Rect::new(
-        x.max(0),
-        y.max(0),
-        box_w.min(area.width),
-        box_h.min(area.height),
-    );
+    let box_w: u16 = 52.min(area.width);
+    // blank + entries + blank + footer hint + two borders
+    let box_h: u16 = (entries.len() as u16 + 5).min(area.height);
+    let x = area.width.saturating_sub(box_w) / 2;
+    let y = area.height.saturating_sub(box_h) / 2;
+    let rect = Rect::new(x, y, box_w, box_h);
     f.render_widget(Clear, rect);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::ui::theme::ACCENT))
-        .style(Style::default().bg(crate::ui::theme::PANEL_BG))
-        .title("  KEYBINDINGS  ".cyan().bold());
-    let lines = [
-        "  ↑↓ / j k     move selection",
-        "  s / Enter     sync selected device",
-        "  a             abort running sync",
-        "  m             mount / unmount selected device (udisks)",
-        "  Tab / 1-3     switch tab",
-        "  r             refresh devices",
-        "  f             toggle log follow",
-        "  u / d         scroll logs",
-        "  x             clear logs",
-        "  ? / h         this help",
-        "  q / Esc       quit",
-    ];
-    let mut spans = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            spans.push(ratatui::text::Line::raw(""));
-        }
-        let styled = if line.contains('/') {
-            ratatui::text::Span::styled(*line, ratatui::style::Style::default().fg(crate::ui::theme::FG))
-        } else {
-            ratatui::text::Span::styled(*line, ratatui::style::Style::default().fg(DIM))
-        };
-        spans.push(ratatui::text::Line::from(styled));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .style(Style::default().bg(theme::PANEL_BG))
+        .title(Span::styled(
+            "  KEYBINDINGS  ",
+            Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+        ));
+
+    let mut lines: Vec<Line> = vec![Line::raw("")];
+    for (key, desc) in entries {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{key:<11}"),
+                Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(*desc, Style::default().fg(theme::FG)),
+        ]));
     }
-    f.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Text::from(spans)).block(block), rect);
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  press Esc / ? / q to close",
+        Style::default().fg(theme::DIM),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(theme::PANEL_BG)),
+        rect,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::{Config, Device, Firmware};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
+
+    fn test_app() -> App {
+        let config = Config {
+            config_file: PathBuf::from("/tmp/dap-tui-test/config.toml"),
+            local_music_dir: PathBuf::from("/tmp/dap-tui-test/music"),
+            local_hoerspiele_dir: PathBuf::from("/tmp/dap-tui-test/hoerspiele"),
+            output_dir: PathBuf::from("/tmp/dap-tui-test/state"),
+            storagebox_source: "storagebox:test".into(),
+            storagebox_hoerspiele_source: "storagebox:test-hoerspiele".into(),
+            storagebox_excludes: vec!["/Music/**".into()],
+            devices: vec![Device {
+                name: "Test Player".into(),
+                firmware: Firmware::Rockbox,
+                content_type: "music".into(),
+                sync_command: "true".into(),
+                mount_point: Some(PathBuf::from("/tmp/dap-tui-test/not-mounted")),
+                music_folder: "Music".into(),
+                preserve_fat_order: false,
+                mounted: false,
+                last_sync: None,
+                last_status: String::new(),
+            }],
+        };
+        App::new(config, false).unwrap()
+    }
+
+    fn render(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn renders_all_tabs_and_help_without_panicking() {
+        // Small terminals used to underflow widths; the help overlay used to
+        // clip its last entries because the hardcoded height was too small.
+        for (w, h) in [(40u16, 10u16), (80, 24), (160, 48)] {
+            let mut app = test_app();
+            for tab in crate::app::Tab::ALL {
+                app.tab = tab;
+                let _ = render(&app, w, h);
+            }
+            app.show_help = true;
+            let out = render(&app, w, h);
+            if h >= 24 {
+                assert!(out.contains("KEYBINDINGS"), "help title missing at {w}x{h}");
+                assert!(out.contains("quit"), "last help entry clipped at {w}x{h}");
+            }
+        }
+    }
 }

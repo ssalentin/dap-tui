@@ -76,6 +76,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let content_h = inner.height.saturating_sub(1) as usize;
+    app.log_view.set(content_h);
     let offset = if app.log_follow {
         lines.len().saturating_sub(content_h)
     } else {

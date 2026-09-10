@@ -83,6 +83,8 @@ pub enum EngineEvent {
     Log(LogEntry),
     Changed,
     Finished {
+        /// Name of the device the finished sync targeted.
+        device: String,
         ok: bool,
         summary: String,
     },
@@ -180,8 +182,19 @@ impl Engine {
     }
 
     pub fn start_sync(&self, device: Device, config: Arc<Config>, skip_mirror: bool) {
-        if self.running() {
-            return;
+        // Mark the engine busy *before* spawning. Otherwise a double keypress
+        // could pass the `running()` check twice and start two concurrent
+        // syncs (the worker used to be the one setting `running`).
+        match self.state.lock() {
+            Ok(mut s) => {
+                if s.running {
+                    return;
+                }
+                s.running = true;
+                s.device = Some(device.name.clone());
+                s.summary = "Starting sync…".to_string();
+            }
+            Err(_) => return,
         }
         self.abort.store(false, Ordering::Relaxed);
         let ctx = Arc::new(WorkerCtx {
@@ -243,6 +256,14 @@ fn run_sync(config: Arc<Config>, device: Device, skip_mirror: bool, ctx: Arc<Wor
         }
     };
 
+    // Persist first: a new sync may start as soon as `running` flips to false
+    // (and reset the shared abort flag), so all shared state must be final
+    // before we publish completion.
+    config::save_state(&config.output_dir, &name, Local::now(), if ok { "ok" } else { "error" });
+    ctx.log(
+        if ok { LogLevel::Success } else { LogLevel::Error },
+        if ok { format!("✓ {summary}") } else { format!("✗ {summary}") },
+    );
     {
         let mut s = ctx.state.lock().unwrap();
         s.running = false;
@@ -255,17 +276,12 @@ fn run_sync(config: Arc<Config>, device: Device, skip_mirror: bool, ctx: Arc<Wor
             }
         }
     }
-    ctx.log(
-        if ok { LogLevel::Success } else { LogLevel::Error },
-        if ok { format!("✓ {summary}") } else { format!("✗ {summary}") },
-    );
     ctx.changed();
     let _ = ctx.tx.send(EngineEvent::Finished {
+        device: name.clone(),
         ok,
         summary: summary.clone(),
     });
-
-    config::save_state(&config.output_dir, &name, Local::now(), if ok { "ok" } else { "error" });
 }
 
 fn run_pipeline(
@@ -274,8 +290,6 @@ fn run_pipeline(
     skip_mirror: bool,
     ctx: &WorkerCtx,
 ) -> Result<(), String> {
-    let steps = build_steps(device);
-
     if !skip_mirror {
         ctx.set_step(0, StepStatus::Active, "refreshing local library…");
         run_mirror(config, device, ctx)?;
@@ -312,7 +326,6 @@ fn run_pipeline(
         }
     }
 
-    let _ = steps;
     Ok(())
 }
 
@@ -445,6 +458,11 @@ fn scan_music_dir(base: &Path) -> HashMap<String, (u64, i64)> {
             }
             let path = entry.path();
             if path.is_dir() {
+                // Never follow symlinked directories: a device can contain
+                // self-referential links and we would recurse forever.
+                if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }
@@ -479,21 +497,26 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
         .as_ref()
         .ok_or_else(|| "mount_point is not set for this device".to_string())?;
 
-    if !mount.exists() {
-        ctx.log(LogLevel::Info, format!("device not mounted at {} — trying udisksctl…", mount.display()));
+    if !crate::disk::is_mounted(mount) {
+        ctx.log(
+            LogLevel::Info,
+            format!("device not mounted at {} — trying udisksctl…", mount.display()),
+        );
         match crate::udisks::mount_device(mount) {
             Ok(msg) => ctx.log(LogLevel::Info, format!("auto-mounted: {msg}")),
             Err(e) => {
                 return Err(format!(
-                    "device not found at {} — connect & mount it (m) and retry. {e}",
+                    "device not mounted at {} — connect & mount it (m) and retry. {e}",
                     mount.display()
                 ));
             }
         }
     }
-    if !mount.exists() {
+    // A leftover (empty) mount-point directory must not be mistaken for a
+    // mounted device — rsync would otherwise happily fill the root filesystem.
+    if !crate::disk::is_mounted(mount) {
         return Err(format!(
-            "device not found at {} — connect & mount it (m) and retry",
+            "{} exists but is not a mount point — refusing to sync. Connect the device and press 'm'.",
             mount.display()
         ));
     }
@@ -626,8 +649,13 @@ fn remove_stale(dest: &Path, to_delete: &[String]) {
         if let Some(p) = actual.get(key) {
             if p.exists() {
                 let _ = fs::remove_file(p);
-                if let Some(parent) = p.parent() {
-                    let _ = fs::remove_dir(parent); // remove if now empty
+                // Prune directories that are now empty, up to (not including) dest.
+                let mut parent = p.parent();
+                while let Some(d) = parent {
+                    if d == dest || fs::remove_dir(d).is_err() {
+                        break;
+                    }
+                    parent = d.parent();
                 }
             }
         }
@@ -743,6 +771,33 @@ fn pump_lines<R: std::io::Read + Send + 'static>(
     }
 }
 
+/// Put the child in its own process group so a whole pipeline (e.g.
+/// `sh -c podkit …`, or rsync's own children) can be signalled on abort.
+#[cfg(unix)]
+fn detach_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+}
+
+/// Signal the process group of `child` (SIGTERM, or SIGKILL when `force`).
+fn terminate_process_group(child: &mut std::process::Child, force: bool) {
+    #[cfg(unix)]
+    unsafe {
+        let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+        libc::kill(-(child.id() as i32), sig);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = force;
+        let _ = child.kill();
+    }
+}
+
 /// Run a command, streaming its output lines to `on_line`. Returns Err on
 /// failure or abort. Lines returned `true` from `on_line` are treated as
 /// consumed (progress); unconsumed lines are logged.
@@ -759,11 +814,16 @@ fn stream<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let mut child = Command::new(cmd)
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    detach_process_group(&mut command);
+
+    let mut child = command
         .spawn()
         .map_err(|e| format!("could not start {cmd}: {e}"))?;
 
@@ -775,11 +835,19 @@ where
     let out_thread = thread::spawn(move || pump_lines(stdout, false, out_tx));
     let err_thread = thread::spawn(move || pump_lines(stderr, true, tx));
 
+    // On abort, ask the whole process group to terminate; escalate to SIGKILL
+    // if the pipes have not closed within a grace period.
+    let mut terminating: Option<std::time::Instant> = None;
     loop {
-        if ctx.abort.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("aborted".to_string());
+        if ctx.abort.load(Ordering::Relaxed) && terminating.is_none() {
+            terminate_process_group(&mut child, false);
+            terminating = Some(std::time::Instant::now());
+        }
+        if let Some(started) = terminating {
+            if started.elapsed() > std::time::Duration::from_secs(2) {
+                terminate_process_group(&mut child, true);
+                break;
+            }
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok((is_stderr, line)) => {
@@ -852,5 +920,67 @@ mod tests {
         assert_eq!(seen.len(), 2, "stderr lines should arrive live");
         assert!(seen[0].contains("first stats line"));
         assert!(seen[1].contains("second stats line"));
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // `pid (comm) state …` — comm may itself contain spaces/parens, so
+            // split at the *last* `) ` and read the state character.
+            Ok(stat) => stat
+                .rsplit(") ")
+                .next()
+                .map(|rest| !rest.starts_with('Z'))
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn abort_terminates_whole_process_group() {
+        // `sh -c` spawns a long-running grandchild; aborting must terminate
+        // the whole group, not just the direct shell child (which used to be
+        // left orphaned and running when the user pressed `a` or quit).
+        let (tx, _rx) = mpsc::channel::<EngineEvent>();
+        let ctx = Arc::new(WorkerCtx {
+            state: Arc::new(Mutex::new(SyncState::default())),
+            tx,
+            abort: Arc::new(AtomicBool::new(false)),
+        });
+        let grandchild: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+        let capture = grandchild.clone();
+        let args: Vec<String> = vec![
+            "-c".to_string(),
+            "sleep 30 & echo CHILD:$!; wait".to_string(),
+        ];
+
+        let abort = ctx.abort.clone();
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(400));
+            abort.store(true, Ordering::Relaxed);
+        });
+
+        let start = std::time::Instant::now();
+        let result = stream(&ctx, "sh", &args, move |line| {
+            if let Some(pid) = line.strip_prefix("CHILD:") {
+                *capture.lock().unwrap() = pid.trim().parse().ok();
+            }
+            true
+        });
+        assert!(result.is_err(), "aborted stream must return an error");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "abort must not hang"
+        );
+
+        let pid = grandchild.lock().unwrap().expect("grandchild pid captured");
+        for _ in 0..20 {
+            if !process_is_alive(pid) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("grandchild process {pid} survived the abort");
     }
 }

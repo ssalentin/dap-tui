@@ -19,7 +19,11 @@ living dashboard instead of a batch CLI.
 - **Live sync engine** — streams `rclone` and `rsync` output, parses progress
   (byte-weighted via `--info=progress2`), NFC-aware diffing for
   macOS→FAT32/Android devices, optional `fatsort` finalize for Mlove devices.
-- **Abort-safe** — `a` kills the running child process cleanly.
+- **Abort-safe** — `a` kills the running child process group cleanly; quitting
+  while a sync runs aborts it first instead of leaving it orphaned.
+- **Mount-aware** — a path that exists but is not a real mount point is flagged
+  and refused as a sync target, so a leftover mount directory can't silently
+  receive a sync on the root filesystem.
 - Reads the existing `~/.config/dap-sync/config.toml` (compatible with
   `dap-sync`), persists last-sync state to `~/.local/share/dap-sync/sync-state.toml`.
 
@@ -41,7 +45,7 @@ cargo build --release
 | `a`          | abort running sync           |
 | `m`          | mount / unmount device (udisks2, no sudo) |
 | `Tab` / `1-3`| switch tab                   |
-| `r`          | refresh device mounts        |
+| `r`          | reload config + refresh mounts |
 | `f`          | toggle log follow            |
 | `u` / `d`    | scroll logs                  |
 | `x`          | clear logs                   |
@@ -90,6 +94,11 @@ Devices are mounted/unmounted without sudo via **udisks2**:
 `m` in the TUI mounts/unmounts the selected device, and a sync automatically
 mounts the target first (resolved by mount-point label via `lsblk`). Only the
 mlove `fatsort` step needs root (raw block device).
+
+Mount status and sync targets are validated against the kernel mount table
+(`/proc/self/mountinfo`), not just directory existence: if the configured
+`mount_point` exists but is not actually mounted, `dap-tui` refuses to sync to
+it rather than writing the library onto the root filesystem.
 
 ## Development
 

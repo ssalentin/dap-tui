@@ -53,7 +53,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let [steps, progress] =
-        Layout::vertical([Constraint::Min(6), Constraint::Length(6)]).areas(body);
+        Layout::vertical([Constraint::Min(6), Constraint::Length(7)]).areas(body);
     draw_steps(f, steps, &state, app);
     draw_progress(f, progress, &state);
 }
@@ -202,21 +202,20 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
         ));
     f.render_widget(g, gauge_row);
 
-    let mut lines: Vec<Line> = Vec::new();
-    if !done.is_empty() || !total.is_empty() {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                if done.is_empty() { "…".to_string() } else { done.clone() },
-                Style::default().fg(theme::CYAN),
-            ),
-            Span::styled(" / ", Style::default().fg(theme::DIM)),
-            Span::styled(
-                if total.is_empty() { "…".to_string() } else { total },
-                Style::default().fg(theme::CYAN),
-            ),
-        ]));
-    }
+    // Line 1: bytes transferred on the left, speed + ETA right-aligned on the
+    // same row (they used to be pushed onto a third line that the panel height
+    // clipped, so they were usually invisible).
+    let mut left: Vec<Span> = vec![Span::raw("  ")];
+    left.push(Span::styled(
+        if done.is_empty() { "…".to_string() } else { done.clone() },
+        Style::default().fg(theme::CYAN),
+    ));
+    left.push(Span::styled(" / ", Style::default().fg(theme::DIM)));
+    left.push(Span::styled(
+        if total.is_empty() { "…".to_string() } else { total },
+        Style::default().fg(theme::CYAN),
+    ));
+
     let mut right: Vec<Span> = Vec::new();
     if !speed.is_empty() {
         right.push(Span::styled(speed, Style::default().fg(theme::YELLOW)));
@@ -225,22 +224,23 @@ fn draw_progress(f: &mut Frame, area: Rect, state: &SyncState) {
         right.push(Span::styled("  ETA ", Style::default().fg(theme::DIM)));
         right.push(Span::styled(eta, Style::default().fg(theme::YELLOW)));
     }
-    if !current.is_empty() {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                truncate(&current, inner.width.saturating_sub(2) as usize),
-                Style::default().fg(theme::DIM),
-            ),
-        ]));
-    } else {
-        lines.push(Line::raw(""));
-    }
-    let mut stats_line = lines;
-    stats_line.push(Line::from(
-        std::iter::once(Span::raw("  "))
-            .chain(right.into_iter())
-            .collect::<Vec<_>>(),
-    ));
-    f.render_widget(Paragraph::new(stats_line).style(Style::default().bg(theme::PANEL_BG)), stats);
+
+    let used: usize = left.iter().map(|s| s.width()).sum::<usize>()
+        + right.iter().map(|s| s.width()).sum::<usize>();
+    let pad = (inner.width as usize).saturating_sub(used + 2);
+    left.push(Span::raw(" ".repeat(pad)));
+    left.extend(right);
+
+    let mut lines = vec![Line::from(left)];
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate(&current, inner.width.saturating_sub(2) as usize),
+            Style::default().fg(theme::DIM),
+        ),
+    ]));
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)),
+        stats,
+    );
 }
