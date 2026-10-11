@@ -52,11 +52,40 @@ pub fn mounted_path_for(path: &Path) -> Option<PathBuf> {
     }
     let parent = path.parent()?;
     let base = path.file_name()?.to_string_lossy().to_string();
-    mount_points()
+    if let Some(found) = mount_points()
         .into_iter()
         .filter_map(|mp| mount_suffix_rank(parent, &base, &mp).map(|rank| (rank, mp)))
         .min_by_key(|(rank, _)| *rank)
         .map(|(_, mp)| mp)
+    {
+        return Some(found);
+    }
+    // The volume may have been mounted under a different parent than the
+    // configured hint. udisks mounts removable media at /media/$USER/$LABEL,
+    // but this machine's automount puts them at /run/media/$USER/$LABEL, so a
+    // config written for /media/... would otherwise report as "not mounted"
+    // (and the sidebar would show 0 mounted devices). Fall back to matching the
+    // basename as a volume label anywhere in the mount table, mirroring the
+    // label lookup in `udisks::resolve_block_device`.
+    mounted_by_label(&base)
+}
+
+/// Find a mount point whose basename equals `label`, preferring the highest
+/// mount (shortest path) so nested mounts do not shadow a real volume.
+fn mounted_by_label(label: &str) -> Option<PathBuf> {
+    if label.is_empty() {
+        return None;
+    }
+    let mut matches: Vec<PathBuf> = mount_points()
+        .into_iter()
+        .filter(|mp| {
+            mp.file_name()
+                .map(|n| n.to_string_lossy() == label)
+                .unwrap_or(false)
+        })
+        .collect();
+    matches.sort_by_key(|p| p.components().count());
+    matches.into_iter().next()
 }
 
 /// Rank of a mount point relative to a configured path: 0 for an exact match,
@@ -158,6 +187,28 @@ mod tests {
             mounted_path_for(std::path::Path::new("/")),
             Some(std::path::PathBuf::from("/"))
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn resolves_mount_under_a_different_parent_by_label() {
+        // udisks uses /media/$USER/$LABEL while this host's automount uses
+        // /run/media/$USER/$LABEL. A config path under /media must still
+        // resolve to the real mount so the sidebar shows it as mounted.
+        let real = std::path::Path::new("/run/media/sebastian/SD_CARD");
+        if !real.is_dir() {
+            return; // card not attached in this environment
+        }
+        assert_eq!(
+            mounted_path_for(std::path::Path::new("/media/sebastian/SD_CARD")),
+            Some(std::path::PathBuf::from("/run/media/sebastian/SD_CARD"))
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn unknown_label_does_not_resolve() {
+        assert_eq!(mounted_path_for(std::path::Path::new("/media/sebastian/NOPE_NOT_HERE")), None);
     }
 
     #[test]

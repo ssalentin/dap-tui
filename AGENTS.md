@@ -9,6 +9,7 @@
   ```bash
   sha256sum ~/.cargo/bin/dap-tui target/release/dap-tui   # hashes must match
   ```
-- Commit and push changes to the Gitea remote (`origin`) when done.
+- Commit and push changes to `origin` when done — **GitHub only** (`github.com:ssalentin/dap-tui`,
+  branch `main`). Gitea is retired; do not add or push to a Gitea remote.
 
-See `../AGENTS.md` for the global rules (sudo/pkexec, Gitea push, etc.).
+See `../AGENTS.md` for the global rules (sudo/pkexec, etc.).
