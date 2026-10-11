@@ -348,6 +348,17 @@ fn run_pipeline(
 
 // ── step 1: mirror StorageBox → local library ────────────────────────────────
 
+/// Whether the mirror step copies from a local directory with `rsync` (true)
+/// rather than from a remote with `rclone` (false).
+///
+/// A source is treated as local when it is an absolute path that currently
+/// exists as a directory. This is the single source of truth for the decision
+/// so the engine and the UI's SYNC PATH chain cannot disagree.
+pub fn mirror_uses_rsync(source: &str) -> bool {
+    let p = PathBuf::from(source);
+    p.is_absolute() && p.is_dir()
+}
+
 fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
     let (source, local_dir, label) = if device.content_type == "hoerspiele" {
         (
@@ -365,8 +376,7 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
 
     fs::create_dir_all(&local_dir).map_err(|e| format!("cannot create {}: {e}", local_dir.display()))?;
 
-    let src_path = PathBuf::from(&source);
-    if src_path.is_absolute() && src_path.is_dir() {
+    if mirror_uses_rsync(&source) {
         ctx.log(
             LogLevel::Info,
             format!("Mirroring {label} from local source {} → {}", source, local_dir.display()),
@@ -962,6 +972,21 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn mirror_transport_follows_source_shape() {
+        // An existing local absolute directory is mirrored with rsync, so the
+        // UI's SYNC PATH chain must label that arrow `rsync`.
+        let tmp = std::env::temp_dir().join("dap-tui-mirror-transport-test");
+        fs::create_dir_all(&tmp).unwrap();
+        assert!(mirror_uses_rsync(&tmp.display().to_string()));
+
+        // An rclone remote (`storagebox:...`) or a non-existent path is not a
+        // local directory, so it goes through rclone.
+        assert!(!mirror_uses_rsync("storagebox:backup/masters"));
+        assert!(!mirror_uses_rsync("/nonexistent/dap-tui/definitely-missing"));
+        assert!(!mirror_uses_rsync("relative/path"));
+    }
 
     #[test]
     fn stream_consumes_stderr_lines_live() {

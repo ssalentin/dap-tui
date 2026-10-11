@@ -428,10 +428,19 @@ fn draw_chain(f: &mut Frame, area: Rect, app: &App, device: &crate::config::Devi
     let local = truncate(&app.config.local_music_dir.display().to_string(), seg2.max(3));
     let device_name = truncate(&device.name, seg3.max(3));
 
+    // Mirror transport: an existing local absolute directory is copied with
+    // rsync; anything else (e.g. an rclone remote like `storagebox:...`) goes
+    // through rclone. Keep this in sync with `engine::run_mirror`.
+    let mirror_tool = if crate::engine::mirror_uses_rsync(&app.config.storagebox_source) {
+        "rsync"
+    } else {
+        "rclone"
+    };
+
     let mut line = vec![
         Span::raw("  "),
         chip(&src),
-        arrow("rclone"),
+        arrow(mirror_tool),
         chip(&local),
         arrow("rsync"),
         chip(&device_name),
