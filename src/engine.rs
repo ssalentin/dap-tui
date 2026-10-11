@@ -447,10 +447,20 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
     // early ticks even showed a single file's percentage, which looked like
     // per-album progress. With the full total known up front the gauge is a
     // true overall percentage; the initial listing shows as a scan phase.
+    //
+    // `--checkers`/`--transfers` are raised above rclone's defaults (8/4):
+    // against a high-latency SFTP remote the scan and the many-small-files
+    // case are round-trip-bound, so more parallel requests directly cut
+    // wall-clock time. Note these explicit flags take precedence over any
+    // RCLONE_CHECKERS/RCLONE_TRANSFERS environment variables.
     args.extend(
         [
             "--create-empty-src-dirs",
             "--check-first",
+            "--checkers",
+            "16",
+            "--transfers",
+            "8",
             "--progress",
             "--stats",
             "1s",
