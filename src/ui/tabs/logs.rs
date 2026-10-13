@@ -27,6 +27,24 @@ fn level_tag(level: LogLevel) -> &'static str {
     }
 }
 
+/// The level tag, as a badge for levels that need to stand out while
+/// scrolling (warn/error), or as plain padded text otherwise — always the
+/// same total width so the message column stays aligned either way.
+fn level_tag_span(level: LogLevel) -> Span<'static> {
+    let text = format!(" {:>4} ", level_tag(level));
+    match level {
+        LogLevel::Error => Span::styled(
+            text,
+            Style::default().fg(theme::BG).bg(theme::RED).add_modifier(Modifier::BOLD),
+        ),
+        LogLevel::Warn => Span::styled(
+            text,
+            Style::default().fg(theme::BG).bg(theme::YELLOW).add_modifier(Modifier::BOLD),
+        ),
+        _ => Span::styled(text, level_style(level)),
+    }
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
@@ -93,8 +111,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             let ts = e.ts.format("%H:%M:%S").to_string();
             Line::from(vec![
                 Span::styled(format!(" {ts} "), Style::default().fg(theme::DIM)),
-                Span::styled(format!("{:>4}", level_tag(e.level)), level_style(e.level)),
-                Span::raw("  "),
+                level_tag_span(e.level),
+                Span::raw(" "),
                 Span::styled(e.msg.clone(), level_style(e.level)),
             ])
         })

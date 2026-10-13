@@ -100,9 +100,21 @@ fn draw_device_card(f: &mut Frame, area: Rect, app: &App, device: &crate::config
         kv_w(label, truncate(&value, value_w), style, lw)
     };
 
-    let name = truncate(&device.name, inner.width.saturating_sub(6) as usize);
     let fw = device.firmware.label().to_string();
     let fw_color = firmware_color(&device.firmware);
+    // Budget the firmware tag's actual width before truncating the name, so a
+    // long device name on a narrow card truncates cleanly instead of running
+    // the tag off the edge mid-bracket (e.g. "[rockbo").
+    let fw_tag = format!("[{fw}]");
+    let indent = 2usize;
+    let min_name = 3usize;
+    let show_fw_tag = (inner.width as usize) >= indent + min_name + fw_tag.chars().count() + 1;
+    let name_budget = if show_fw_tag {
+        (inner.width as usize).saturating_sub(indent + fw_tag.chars().count() + 1)
+    } else {
+        (inner.width as usize).saturating_sub(indent)
+    };
+    let name = truncate(&device.name, name_budget.max(min_name));
 
     let (status, status_style) = if device.mounted {
         (
@@ -134,15 +146,20 @@ fn draw_device_card(f: &mut Frame, area: Rect, app: &App, device: &crate::config
         None => ("never".to_string(), Style::default().fg(theme::DIM)),
     };
 
+    let mut header_spans = vec![
+        Span::raw("  "),
+        Span::styled(name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+    ];
+    if show_fw_tag {
+        header_spans.push(Span::raw(" "));
+        header_spans.push(Span::styled(
+            fw_tag,
+            Style::default().fg(fw_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(" [{fw}] "),
-                Style::default().fg(fw_color).add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(header_spans),
         line("status", status.to_string(), status_style),
         line("last sync", last, last_style),
     ];
