@@ -10,15 +10,33 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
 
 use theme::BG;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Truncate `s` to at most `max` terminal display cells (not Unicode scalar
+/// values), appending `…` when it doesn't fit. Double-width characters (CJK,
+/// emoji, …) occupy 2 cells, so a scalar-count truncation can leave a
+/// caller's reserved budget (e.g. a firmware tag after the name) partially
+/// overrun even though the string "looks short enough".
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
+    if s.width() <= max {
+        return s.to_string();
     }
+    if max == 0 {
+        return String::new();
+    }
+    let budget = max - 1; // reserve 1 cell for the ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -355,6 +373,21 @@ mod tests {
         assert!(out.contains("40%"), "percentage missing");
         assert!(out.contains("32.082 MiB"), "transferred bytes missing");
         assert!(out.contains("sub/file3.bin"), "current file missing");
+    }
+
+    #[test]
+    fn wide_device_name_truncates_without_clipping_firmware_tag() {
+        // Regression for the device-card header budget: it reserves cells for
+        // the firmware tag based on display width, so truncating the name with
+        // scalar (char) count instead of display-cell width let double-width
+        // (CJK) characters eat into that reserved space and clip "[rockbox]".
+        let mut app = test_app();
+        app.config.devices[0].name = "音楽播放器音楽播".into();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: String = (28..52).map(|x| buffer[(x, 4)].symbol()).collect();
+        assert!(row.contains("[rockbox]"), "firmware tag clipped: {row}");
     }
 
     #[test]
