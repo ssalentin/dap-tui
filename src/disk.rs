@@ -70,19 +70,22 @@ pub fn mounted_path_for(path: &Path) -> Option<PathBuf> {
     mounted_by_label(&base)
 }
 
-/// Find a mount point whose basename equals `label`, preferring the highest
-/// mount (shortest path) so nested mounts do not shadow a real volume.
+/// Find a mount point whose basename equals `label` case-insensitively,
+/// preferring the highest mount (shortest path) so nested mounts do not
+/// shadow a real volume.
 fn mounted_by_label(label: &str) -> Option<PathBuf> {
     pick_by_label(mount_points(), label)
 }
 
-/// Case-insensitive, matching `udisks::resolve_block_device`'s own label
-/// lookup (udev/vfat labels are commonly all-uppercase while a configured
-/// `mount_point` directory name may not be) — this function's job is to
-/// mirror that lookup so the dashboard and the sync engine never disagree
-/// about whether a device is mounted. Takes the mount list as a parameter
-/// (rather than reading `/proc/self/mountinfo` itself) so the matching
-/// logic is unit-testable without a real mount table.
+/// ASCII case-insensitive (`eq_ignore_ascii_case`, not a full Unicode
+/// case-fold — FAT32/vfat labels are effectively ASCII-only, so this is
+/// cheaper than `udisks::resolve_block_device`'s `to_lowercase()` without
+/// behaving differently for any label this codebase actually sees), so the
+/// dashboard and the sync engine never disagree about whether a device is
+/// mounted just because a udev/vfat label (commonly all-uppercase) doesn't
+/// match a configured `mount_point` directory's case. Takes the mount list
+/// as a parameter (rather than reading `/proc/self/mountinfo` itself) so
+/// the matching logic is unit-testable without a real mount table.
 fn pick_by_label(mounts: Vec<PathBuf>, label: &str) -> Option<PathBuf> {
     if label.is_empty() {
         return None;
