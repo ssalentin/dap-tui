@@ -73,14 +73,25 @@ pub fn mounted_path_for(path: &Path) -> Option<PathBuf> {
 /// Find a mount point whose basename equals `label`, preferring the highest
 /// mount (shortest path) so nested mounts do not shadow a real volume.
 fn mounted_by_label(label: &str) -> Option<PathBuf> {
+    pick_by_label(mount_points(), label)
+}
+
+/// Case-insensitive, matching `udisks::resolve_block_device`'s own label
+/// lookup (udev/vfat labels are commonly all-uppercase while a configured
+/// `mount_point` directory name may not be) — this function's job is to
+/// mirror that lookup so the dashboard and the sync engine never disagree
+/// about whether a device is mounted. Takes the mount list as a parameter
+/// (rather than reading `/proc/self/mountinfo` itself) so the matching
+/// logic is unit-testable without a real mount table.
+fn pick_by_label(mounts: Vec<PathBuf>, label: &str) -> Option<PathBuf> {
     if label.is_empty() {
         return None;
     }
-    let mut matches: Vec<PathBuf> = mount_points()
+    let mut matches: Vec<PathBuf> = mounts
         .into_iter()
         .filter(|mp| {
             mp.file_name()
-                .map(|n| n.to_string_lossy() == label)
+                .map(|n| n.to_string_lossy().eq_ignore_ascii_case(label))
                 .unwrap_or(false)
         })
         .collect();
@@ -163,7 +174,29 @@ pub fn fmt_bytes(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_bytes, mounted_path_for, mount_suffix_rank, unescape_octal};
+    use super::{fmt_bytes, mounted_path_for, mount_suffix_rank, pick_by_label, unescape_octal};
+
+    #[test]
+    fn matches_mount_labels_case_insensitively() {
+        // A udev/vfat label is commonly all-uppercase (e.g. "IPOD") even when
+        // the configured mount_point directory is not — this must still
+        // resolve, mirroring udisks::resolve_block_device's own
+        // case-insensitive label lookup so the dashboard and the sync engine
+        // never disagree about whether a device is mounted.
+        let mounts = vec![
+            std::path::PathBuf::from("/media/sebastian/IPOD"),
+            std::path::PathBuf::from("/media/sebastian/OTHER"),
+        ];
+        assert_eq!(
+            pick_by_label(mounts.clone(), "ipod"),
+            Some(std::path::PathBuf::from("/media/sebastian/IPOD"))
+        );
+        assert_eq!(
+            pick_by_label(mounts.clone(), "IPOD"),
+            Some(std::path::PathBuf::from("/media/sebastian/IPOD"))
+        );
+        assert_eq!(pick_by_label(mounts, "nope"), None);
+    }
 
     #[test]
     fn ranks_udisks_suffixed_mounts() {
