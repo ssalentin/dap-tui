@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 fn kv_w<'a>(label: &str, value: String, value_style: Style, label_w: usize) -> Line<'a> {
     Line::from(vec![
@@ -424,17 +425,24 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
         .min_by_key(|dt| now.signed_duration_since(*dt).num_seconds().max(0))
         .map(relative_ago)
         .unwrap_or_else(|| "—".to_string());
-    let footer = format!("  {ok} ok · {err} err · {never} never · last {last}");
-    let footer = if footer.chars().count() > inner.width as usize {
-        // Falls back to the compact form rather than mid-word clipping when
-        // the card is too narrow for the full summary (several devices with
-        // long "ago" strings on a narrower terminal).
-        format!("  {ok} ok · {err} err · {never} never")
-    } else {
-        footer
-    };
+    // Drop whole fields right-to-left rather than char-truncating when the
+    // card is too narrow for the full summary: a char-level ellipsis cut
+    // (e.g. "1 nev…") loses meaning mid-word, exactly the failure this line
+    // exists to avoid. Checked by display-cell width, not char count, so a
+    // future non-ASCII `last` string (relative_ago is ASCII-only today)
+    // can't misjudge the budget either.
+    let candidates = [
+        format!("  {ok} ok · {err} err · {never} never · last {last}"),
+        format!("  {ok} ok · {err} err · {never} never"),
+        format!("  {ok} ok · {err} err"),
+        format!("  {ok} ok"),
+    ];
+    let footer = candidates
+        .into_iter()
+        .find(|c| c.width() <= inner.width as usize)
+        .unwrap_or_default();
     lines.push(Line::from(Span::styled(
-        truncate(&footer, inner.width as usize),
+        footer,
         Style::default().fg(theme::DIM),
     )));
 
