@@ -1,11 +1,17 @@
 # dap-tui
 
+[![CI](https://github.com/ssalentin/dap-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/ssalentin/dap-tui/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/ssalentin/dap-tui)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.3-blue)](Cargo.toml)
+
 A terminal UI for device sync of portable music players, rewritten from scratch
 in Rust on top of [ratatui](https://ratatui.rs/).
 
 It mirrors the StorageBox masters library into your local music directory, then
 syncs a device profile — the same pipeline as the Python `dap-sync`, now as a
 living dashboard instead of a batch CLI.
+
+![Dashboard](docs/screenshots/dashboard.png)
 
 ## Highlights
 
@@ -19,7 +25,8 @@ living dashboard instead of a batch CLI.
   mode, warning/error counters).
 - **Responsive layout** — short terminals drop the decorative sync-path card,
   narrow cards switch to compact labels/values and ellipsize long paths
-  instead of clipping them mid-word.
+  instead of clipping them mid-word, and cards size to their own content
+  instead of stretching into dead space on a tall terminal.
 - **Live sync engine** — streams `rclone` and `rsync` output, parses progress
   (byte-weighted via `--info=progress2`), NFC-aware diffing for
   macOS→FAT32/Android devices, optional `fatsort` finalize for Mlove devices.
@@ -59,6 +66,49 @@ dap-tui
 | `x`          | clear logs                   |
 | `?` / `h`    | help overlay                 |
 | `q` / `Esc`  | quit                         |
+
+## Manual
+
+### Syncing a device
+
+![Sync tab](docs/screenshots/sync.png)
+
+Select a device in the **DEVICES** sidebar with `↑`/`↓` or `j`/`k`, then press
+`s` or `Enter`. The Sync tab switches to a live step timeline — Mirror
+StorageBox → Sync *device* → Finalize FAT (Mlove devices only) — with a
+progress gauge showing percent complete, bytes transferred, speed and ETA. A
+cloud mirror shows a "Scanning remote" phase first while rclone lists the
+whole remote (`--check-first`) before any bytes move, so the percentage is a
+true overall figure instead of a growing-total guess. Once a sync finishes,
+the step timeline and its ✓/✗ outcomes stay on screen — press `s` again to
+rerun.
+
+### Mounting and unmounting
+
+Press `m` on the selected device to mount or unmount it via **udisks2** — no
+`sudo` required. Starting a sync on an unmounted device mounts it
+automatically first; if that fails, dap-tui tells you to connect the device
+and mount it (`m`), then retry. Mount state and the sync target are always
+checked against the real kernel mount table (`/proc/self/mountinfo`), never
+just whether the configured directory happens to exist, so a leftover empty
+mount folder from an earlier unclean eject is never mistaken for a connected
+device.
+
+### Aborting
+
+Press `a` while a sync is running to abort it: the whole child process group
+(rclone, rsync, podkit, and anything they in turn spawned) is signalled to
+terminate, escalating to a hard kill if it hasn't stopped within a couple of
+seconds. Quitting (`q` / `Esc`) during an active sync runs the same abort
+first, so closing dap-tui can never leave a sync running in the background.
+
+### Following logs
+
+Switch to the Logs tab (`3`, or `Tab`/`Shift-Tab`) for color-coded output —
+info, file transfers, warnings and errors are each styled distinctly, with a
+running warning/error count in the header. Press `f` to toggle follow mode
+(auto-scroll to the newest line) on and off, `u`/`d` to scroll manually, and
+`x` to clear the buffer.
 
 ## Configuration
 
@@ -103,16 +153,19 @@ Firmware types: `apple` (podkit command), `rockbox`, `android`, `sony`
 
 Devices are mounted/unmounted without sudo via **udisks2**:
 `m` in the TUI mounts/unmounts the selected device, and a sync automatically
-mounts the target first (resolved by mount-point label via `lsblk`). Only the
-mlove `fatsort` step needs root (raw block device).
+mounts the target first (resolved by mount-point label via `lsblk`, matched
+case-insensitively). Only the mlove `fatsort` step needs root (raw block
+device).
 
 Mount status and sync targets are validated against the kernel mount table
 (`/proc/self/mountinfo`), not just directory existence. The configured
 `mount_point` is a hint: if udisks mounted the volume at a suffixed sibling
-because the configured directory already existed (e.g. `IPOD` → `IPOD1`),
-dap-tui follows the actual mount and uses it as the sync destination. If the
-path exists but is not a mount at all, syncing into it is refused rather than
-writing the library onto the root filesystem.
+because the configured directory already existed (e.g. `IPOD` → `IPOD1`), or
+under a different parent than configured (e.g. an automount service using
+`/run/media/...` while the config says `/media/...`), dap-tui follows the
+actual mount and uses it as the sync destination. If the path exists but is
+not a mount at all, syncing into it is refused rather than writing the
+library onto the root filesystem.
 
 ## Development
 

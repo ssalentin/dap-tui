@@ -336,6 +336,8 @@ mod tests {
         dump_frame_sized(&app, "SYNC / FINISHED 80x24", 80, 24);
         app.tab = crate::app::Tab::Dashboard;
         dump_frame_sized(&app, "DASHBOARD 80x24", 80, 24);
+        dump_frame_sized(&app, "DASHBOARD 40x15", 40, 15);
+        dump_frame_sized(&app, "DASHBOARD 60x12", 60, 12);
     }
 
     #[test]
