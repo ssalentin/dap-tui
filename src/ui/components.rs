@@ -68,14 +68,15 @@ pub fn key_hint(key: &str) -> Span<'static> {
 // ── title bar ─────────────────────────────────────────────────────────────────
 
 pub fn draw_title(f: &mut Frame, area: Rect, app: &App) {
-    let mut spans = vec![
-        Span::styled(
-            " dap-tui ",
-            Style::default()
-                .fg(theme::BG)
-                .bg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+    let brand = Span::styled(
+        " dap-tui ",
+        Style::default()
+            .fg(theme::BG)
+            .bg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    );
+    let full_chain = vec![
+        brand.clone(),
         Span::raw("  "),
         Span::styled(
             "StorageBox",
@@ -111,10 +112,22 @@ pub fn draw_title(f: &mut Frame, area: Rect, app: &App) {
         ),
     ];
 
-    // pad to full width
-    let left_w: usize = spans.iter().map(|s| s.width()).sum();
+    // pad to full width. The breadcrumb chain is decorative, so on a narrow
+    // terminal it is dropped first rather than letting it collide with the
+    // live mirror/sync status (the one thing here that is never safe to lose
+    // — padding used to saturate to 0 and run both halves together).
     let right_w: usize = right_spans.iter().map(|s| s.width()).sum();
     let total = area.width as usize;
+    let full_w: usize = full_chain.iter().map(|s| s.width()).sum();
+    let brand_w: usize = brand.width();
+    let mut spans = if full_w + right_w + 1 <= total {
+        full_chain
+    } else if brand_w + right_w + 1 <= total {
+        vec![brand]
+    } else {
+        Vec::new()
+    };
+    let left_w: usize = spans.iter().map(|s| s.width()).sum();
     let pad = total.saturating_sub(left_w + right_w);
     spans.push(Span::raw(" ".repeat(pad)));
     spans.append(&mut right_spans);
@@ -383,10 +396,15 @@ pub fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let total = area.width as usize;
     let lw: usize = left_spans.iter().map(|s| s.width()).sum();
     let rw: usize = right_spans.iter().map(|s| s.width()).sum();
-    let pad = total.saturating_sub(lw + rw);
     let mut all = left_spans;
-    all.push(Span::raw(" ".repeat(pad)));
-    all.extend(right_spans);
+    // The device-count/version footer is secondary to the live status
+    // message on the left; drop it on a narrow terminal rather than letting
+    // the two halves collide with no separating space.
+    if lw + rw + 1 <= total {
+        let pad = total.saturating_sub(lw + rw);
+        all.push(Span::raw(" ".repeat(pad)));
+        all.extend(right_spans);
+    }
 
     f.render_widget(
         Paragraph::new(Line::from(all)).style(Style::default().bg(theme::BG_ALT)),
@@ -461,6 +479,18 @@ pub fn draw_keys(f: &mut Frame, area: Rect, _app: &App) {
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
+
+/// Vertically centre `lines` within a card `height` rows tall by padding
+/// blank lines above. Dashboard cards size to the richest device/config
+/// combination, so on a roomier terminal a sparser one (fewer devices, no
+/// excludes, …) would otherwise sit glued to the top with a dead gap below;
+/// centering reads as a deliberately framed card instead.
+pub fn vcenter(lines: Vec<Line<'static>>, height: u16) -> Vec<Line<'static>> {
+    let pad = (height as usize).saturating_sub(lines.len()) / 2;
+    let mut out = vec![Line::raw(""); pad];
+    out.extend(lines);
+    out
+}
 
 pub fn step_icon(status: StepStatus, app: &App) -> Span<'static> {
     match status {

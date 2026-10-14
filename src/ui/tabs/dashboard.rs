@@ -56,9 +56,17 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     // Three stacked rows normally; drop the decorative SYNC PATH card when the
     // terminal is too short for all cards to keep a content row.
+    //
+    // Row 1 (DEVICE/SETTINGS) is capped to its natural content height (8 =
+    // 2 border + up to 6 lines, the Apple-firmware worst case) instead of
+    // stretching with the terminal: on a tall terminal a `Min` row here used
+    // to leave most of the card empty below a handful of lines. Row 2
+    // (LIBRARY/SYNC STATUS) still grows to take the rest, but those cards
+    // vertically centre their own content so the extra space reads as
+    // deliberate framing instead of a dead trailing gap.
     let (row1, row2, chain) = if area.height >= 19 {
         let [r1, r2, ch] = Layout::vertical([
-            Constraint::Min(8),
+            Constraint::Length(8),
             Constraint::Min(8),
             Constraint::Length(3),
         ])
@@ -277,7 +285,6 @@ fn draw_settings_card(f: &mut Frame, area: Rect, device: &crate::config::Device)
             Style::default().fg(theme::MAGENTA),
         ));
     }
-    lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
@@ -304,7 +311,6 @@ fn draw_library_card(f: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![
         path_kv("music", &app.config.local_music_dir, value_w, lw),
         path_kv("hoerspiele", &app.config.local_hoerspiele_dir, value_w, lw),
-        Line::raw(""),
     ];
     let source_kv = |label: &str, source: &str, lines: &mut Vec<Line>| {
         let path = std::path::Path::new(source);
@@ -331,13 +337,13 @@ fn draw_library_card(f: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(theme::DIM),
         lw,
     ));
-    lines.push(Line::raw(""));
     lines.push(kv_w(
         "output",
         truncate(&app.config.output_dir.display().to_string(), value_w),
         Style::default().fg(theme::DIM),
         lw,
     ));
+    let lines = crate::ui::components::vcenter(lines, inner.height);
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 
@@ -406,13 +412,10 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
 
-    // summary footer (two compact lines — the one-line variant used to end in
-    // an ugly "…" because the card is narrow)
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        format!("  {ok} ok · {err} err · {never} never"),
-        Style::default().fg(theme::DIM),
-    )));
+    // One summary footer line (used to be two plus a blank separator, which
+    // ran off the bottom of a short card with several devices — the ok/err
+    // summary and the last-sync time are exactly the "state at a glance"
+    // this card exists for, so they must not be the part that gets clipped).
     let last = app
         .config
         .devices
@@ -421,11 +424,21 @@ fn draw_sync_status_card(f: &mut Frame, area: Rect, app: &App) {
         .min_by_key(|dt| now.signed_duration_since(*dt).num_seconds().max(0))
         .map(relative_ago)
         .unwrap_or_else(|| "—".to_string());
+    let footer = format!("  {ok} ok · {err} err · {never} never · last {last}");
+    let footer = if footer.chars().count() > inner.width as usize {
+        // Falls back to the compact form rather than mid-word clipping when
+        // the card is too narrow for the full summary (several devices with
+        // long "ago" strings on a narrower terminal).
+        format!("  {ok} ok · {err} err · {never} never")
+    } else {
+        footer
+    };
     lines.push(Line::from(Span::styled(
-        format!("  last sync {last}"),
+        truncate(&footer, inner.width as usize),
         Style::default().fg(theme::DIM),
     )));
 
+    let lines = crate::ui::components::vcenter(lines, inner.height);
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::PANEL_BG)), inner);
 }
 
