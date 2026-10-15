@@ -512,7 +512,12 @@ fn run_podkit(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
     })
 }
 
-fn scan_music_dir(base: &Path) -> HashMap<String, (u64, i64)> {
+// Keyed by the NFC-normalized relative path so src/dst entries that differ
+// only in Unicode normalization form still compare equal; the `String` value
+// is the *real* on-disk relative path, which is what rsync must be given —
+// an NFC key handed to `--files-from` fails `link_stat` if the file is
+// actually stored NFD-decomposed on disk.
+fn scan_music_dir(base: &Path) -> HashMap<String, (String, u64, i64)> {
     let mut map = HashMap::new();
     let mut stack = vec![base.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -540,6 +545,7 @@ fn scan_music_dir(base: &Path) -> HashMap<String, (u64, i64)> {
                 Ok(r) => r,
                 Err(_) => continue,
             };
+            let real = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
             let key = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().nfc().collect::<String>())
@@ -554,7 +560,7 @@ fn scan_music_dir(base: &Path) -> HashMap<String, (u64, i64)> {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 let mtime = mtime.div_euclid(2) * 2; // FAT32 2s resolution
-                map.insert(key, (size, mtime));
+                map.insert(key, (real, size, mtime));
             }
         }
     }
@@ -620,19 +626,23 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     ctx.set_step(1, StepStatus::Active, format!("scanning device {}…", dest.display()));
     let dst_map = scan_music_dir(&dest);
 
-    let mut to_copy: Vec<String> = Vec::new();
-    for (k, (size, mtime)) in &src_map {
+    // (key, real_path) pairs: sort by the NFC comparison key for stable FAT
+    // order, but hand rsync the real on-disk path so `--files-from` resolves
+    // against the actual bytes, not the normalized comparison key.
+    let mut to_copy: Vec<(&String, &String)> = Vec::new();
+    for (k, (real, size, mtime)) in &src_map {
         let changed = dst_map
             .get(k)
-            .map(|(dsize, dmtime)| dsize != size || dmtime != mtime)
+            .map(|(_, dsize, dmtime)| dsize != size || dmtime != mtime)
             .unwrap_or(true);
         if changed {
-            to_copy.push(k.clone());
+            to_copy.push((k, real));
         }
     }
     if device.preserve_fat_order {
-        to_copy.sort();
+        to_copy.sort_by(|a, b| a.0.cmp(b.0));
     }
+    let to_copy: Vec<String> = to_copy.into_iter().map(|(_, real)| real.clone()).collect();
     let to_delete: Vec<String> = dst_map.keys().filter(|k| !src_map.contains_key(*k)).cloned().collect();
 
     ctx.log(
@@ -1093,5 +1103,87 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("grandchild process {pid} survived the abort");
+    }
+
+    #[test]
+    fn scan_music_dir_keeps_real_path_for_nfd_filenames() {
+        // On-disk name is NFD-decomposed ("o" + combining diaeresis U+0308),
+        // as e.g. macOS can produce. scan_music_dir must keep the real,
+        // un-normalized relative path alongside the NFC comparison key —
+        // the key alone isn't a valid on-disk path for rsync to stat.
+        let base = std::env::temp_dir().join(format!("dap-tui-nfc-scan-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let nfd_name = "Ho\u{0308}rspiel.mp3"; // "o" + combining diaeresis
+        let nfc_name = "H\u{00f6}rspiel.mp3"; // precomposed "ö"
+        assert_ne!(nfd_name, nfc_name, "sanity: the two forms are different byte sequences");
+        fs::write(base.join(nfd_name), b"data").unwrap();
+
+        let map = scan_music_dir(&base);
+        assert_eq!(map.len(), 1);
+        let (key, (real, _size, _mtime)) = map.iter().next().unwrap();
+        assert_eq!(key, nfc_name, "comparison key must be NFC-normalized");
+        assert_eq!(real, nfd_name, "value must keep the real on-disk path, not the normalized key");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rsync_files_from_resolves_real_path_but_not_nfc_key() {
+        // Reproduces the reported failure end to end: handing rsync's
+        // `--files-from` the NFC-normalized key for an NFD-named file fails
+        // link_stat (the bug); handing it the real on-disk path — what
+        // scan_music_dir now returns, and what run_rsync_device's to_copy
+        // now contains — succeeds.
+        let pid = std::process::id();
+        let src = std::env::temp_dir().join(format!("dap-tui-nfc-rsync-src-{pid}"));
+        let dst = std::env::temp_dir().join(format!("dap-tui-nfc-rsync-dst-{pid}"));
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dst);
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        let nfd_name = "Ho\u{0308}rspiel.mp3";
+        fs::write(src.join(nfd_name), b"data").unwrap();
+
+        let src_map = scan_music_dir(&src);
+        assert_eq!(src_map.len(), 1);
+        let (key, (real, _, _)) = src_map.iter().next().unwrap();
+        assert_eq!(real, nfd_name);
+
+        let run_rsync = |list: &[String]| -> std::process::Output {
+            let file_list = write_file_list(list).unwrap();
+            let out = Command::new("rsync")
+                .args([
+                    "-t",
+                    "--files-from",
+                    &file_list,
+                    &format!("{}/", src.display()),
+                    &dst.display().to_string(),
+                ])
+                .output()
+                .unwrap();
+            let _ = fs::remove_file(&file_list);
+            out
+        };
+
+        // The bug: the NFC key doesn't match the real NFD bytes on disk.
+        let bad = run_rsync(std::slice::from_ref(key));
+        assert!(
+            !bad.status.success(),
+            "sanity check: the NFC key must fail link_stat against the NFD on-disk file"
+        );
+
+        // The fix: the real on-disk path transfers successfully.
+        let good = run_rsync(std::slice::from_ref(real));
+        assert!(
+            good.status.success(),
+            "real on-disk path must transfer successfully: {}",
+            String::from_utf8_lossy(&good.stderr)
+        );
+        assert!(dst.join(nfd_name).exists(), "file must land at dest under its real name");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dst);
     }
 }
