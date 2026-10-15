@@ -1168,14 +1168,14 @@ mod tests {
         };
 
         // The bug: the NFC key doesn't match the real NFD bytes on disk.
-        let bad = run_rsync(&[key.clone()]);
+        let bad = run_rsync(std::slice::from_ref(key));
         assert!(
             !bad.status.success(),
             "sanity check: the NFC key must fail link_stat against the NFD on-disk file"
         );
 
         // The fix: the real on-disk path transfers successfully.
-        let good = run_rsync(&[real.clone()]);
+        let good = run_rsync(std::slice::from_ref(real));
         assert!(
             good.status.success(),
             "real on-disk path must transfer successfully: {}",
