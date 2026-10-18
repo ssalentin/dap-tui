@@ -517,15 +517,16 @@ fn run_podkit(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
 // is the *real* on-disk relative path, which is what rsync must be given —
 // an NFC key handed to `--files-from` fails `link_stat` if the file is
 // actually stored NFD-decomposed on disk.
-fn scan_music_dir(base: &Path) -> HashMap<String, (String, u64, i64)> {
+fn scan_music_dir(base: &Path) -> Result<HashMap<String, (String, u64, i64)>, String> {
     let mut map = HashMap::new();
     let mut stack = vec![base.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => return Err(format!("cannot scan {}: {e}", dir.display())),
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("cannot scan {}: {e}", dir.display()))?;
             let name = entry.file_name();
             let name_s = name.to_string_lossy().to_string();
             if name_s.starts_with('.') || name_s.starts_with("._") {
@@ -551,20 +552,21 @@ fn scan_music_dir(base: &Path) -> HashMap<String, (String, u64, i64)> {
                 .map(|c| c.as_os_str().to_string_lossy().nfc().collect::<String>())
                 .collect::<Vec<_>>()
                 .join("/");
-            if let Ok(meta) = entry.metadata() {
-                let size = meta.len();
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let mtime = mtime.div_euclid(2) * 2; // FAT32 2s resolution
-                map.insert(key, (real, size, mtime));
-            }
+            let meta = entry
+                .metadata()
+                .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+            let size = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let mtime = mtime.div_euclid(2) * 2; // FAT32 2s resolution
+            map.insert(key, (real, size, mtime));
         }
     }
-    map
+    Ok(map)
 }
 
 fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
@@ -621,10 +623,12 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
 
     ctx.log(LogLevel::Info, format!("Scanning local {label} library…"));
     ctx.set_step(1, StepStatus::Active, format!("scanning local {label} library…"));
-    let src_map = scan_music_dir(&src_dir);
+    let src_map = scan_music_dir(&src_dir)
+        .map_err(|e| format!("source scan failed — refusing to sync: {e}"))?;
     ctx.log(LogLevel::Info, format!("Scanning device {}…", dest.display()));
     ctx.set_step(1, StepStatus::Active, format!("scanning device {}…", dest.display()));
-    let dst_map = scan_music_dir(&dest);
+    let dst_map = scan_music_dir(&dest)
+        .map_err(|e| format!("device scan failed — refusing to sync: {e}"))?;
 
     // (key, real_path) pairs: sort by the NFC comparison key for stable FAT
     // order, but hand rsync the real on-disk path so `--files-from` resolves
@@ -643,7 +647,13 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
         to_copy.sort_by(|a, b| a.0.cmp(b.0));
     }
     let to_copy: Vec<String> = to_copy.into_iter().map(|(_, real)| real.clone()).collect();
-    let to_delete: Vec<String> = dst_map.keys().filter(|k| !src_map.contains_key(*k)).cloned().collect();
+    // Delete the real on-disk paths from the scan (not the NFC keys) so
+    // NFD-named files are removed by the name they actually have.
+    let to_delete: Vec<String> = dst_map
+        .iter()
+        .filter(|(k, _)| !src_map.contains_key(*k))
+        .map(|(_, (real, _, _))| real.clone())
+        .collect();
 
     ctx.log(
         LogLevel::Info,
@@ -662,8 +672,8 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
 
     if !to_delete.is_empty() {
         ctx.set_step(1, StepStatus::Active, format!("removing {} stale file(s)…", to_delete.len()));
-        remove_stale(&dest, &to_delete);
-        ctx.log(LogLevel::Info, format!("Removed {} stale file(s).", to_delete.len()));
+        let removed = remove_stale(&dest, &to_delete)?;
+        ctx.log(LogLevel::Info, format!("Removed {removed} stale file(s)."));
     }
 
     if !to_copy.is_empty() {
@@ -710,50 +720,31 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     Ok(())
 }
 
-fn remove_stale(dest: &Path, to_delete: &[String]) {
-    let mut actual: HashMap<String, PathBuf> = HashMap::new();
-    let mut stack = vec![dest.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_s = name.to_string_lossy().to_string();
-            if name_s.starts_with('.') || name_s.starts_with("._") {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if let Ok(rel) = path.strip_prefix(dest) {
-                let key = rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().nfc().collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                actual.insert(key, path);
+fn remove_stale(dest: &Path, to_delete: &[String]) -> Result<usize, String> {
+    let mut removed = 0;
+    for rel in to_delete {
+        let path = dest.join(rel);
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            // Already gone (changed between scan and delete) — nothing removed.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "could not remove stale file {}: {e}",
+                    path.display()
+                ))
             }
         }
-    }
-    for key in to_delete {
-        if let Some(p) = actual.get(key) {
-            if p.exists() {
-                let _ = fs::remove_file(p);
-                // Prune directories that are now empty, up to (not including) dest.
-                let mut parent = p.parent();
-                while let Some(d) = parent {
-                    if d == dest || fs::remove_dir(d).is_err() {
-                        break;
-                    }
-                    parent = d.parent();
-                }
+        // Prune directories that are now empty, up to (not including) dest.
+        let mut parent = path.parent();
+        while let Some(d) = parent {
+            if d == dest || fs::remove_dir(d).is_err() {
+                break;
             }
+            parent = d.parent();
         }
     }
+    Ok(removed)
 }
 
 fn write_file_list(items: &[String]) -> Result<String, String> {
@@ -803,11 +794,29 @@ fn finalize_fat(device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
         }
     }
 
+    ensure_unmounted(&target)?;
+
     ctx.log(LogLevel::Info, format!("Running fatsort on {target}…"));
     let (code, detail) = capture("sudo", &["-n", "fatsort", &target])?;
     if code != 0 {
         return Err(format!(
             "fatsort failed (exit {code}) {detail} — run manually: sudo fatsort {target}"
+        ));
+    }
+    Ok(())
+}
+
+/// `fatsort` writes the raw block device, so it must never run while that
+/// filesystem is still mounted — at the old path or anywhere else. Ask findmnt
+/// for the device's current targets rather than trusting the unmount exit
+/// codes or checking a single mount path.
+fn ensure_unmounted(device: &str) -> Result<(), String> {
+    let (code, target) = capture("findmnt", &["-n", "-o", "TARGET", "-S", device])?;
+    if code == 0 && !target.trim().is_empty() {
+        return Err(format!(
+            "{device} is still mounted at {} after the unmount attempts — refusing to run fatsort. Run manually: sudo umount {}",
+            target.trim(),
+            target.trim()
         ));
     }
     Ok(())
@@ -1119,7 +1128,7 @@ mod tests {
         assert_ne!(nfd_name, nfc_name, "sanity: the two forms are different byte sequences");
         fs::write(base.join(nfd_name), b"data").unwrap();
 
-        let map = scan_music_dir(&base);
+        let map = scan_music_dir(&base).unwrap();
         assert_eq!(map.len(), 1);
         let (key, (real, _size, _mtime)) = map.iter().next().unwrap();
         assert_eq!(key, nfc_name, "comparison key must be NFC-normalized");
@@ -1146,7 +1155,7 @@ mod tests {
         let nfd_name = "Ho\u{0308}rspiel.mp3";
         fs::write(src.join(nfd_name), b"data").unwrap();
 
-        let src_map = scan_music_dir(&src);
+        let src_map = scan_music_dir(&src).unwrap();
         assert_eq!(src_map.len(), 1);
         let (key, (real, _, _)) = src_map.iter().next().unwrap();
         assert_eq!(real, nfd_name);
@@ -1185,5 +1194,102 @@ mod tests {
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn scan_fails_closed_and_allows_a_genuinely_empty_source() {
+        let pid = std::process::id();
+        let missing = std::env::temp_dir().join(format!("dap-tui-scan-missing-{pid}"));
+        let _ = fs::remove_dir_all(&missing);
+        let err = scan_music_dir(&missing).unwrap_err();
+        assert!(err.contains("cannot scan"), "{err}");
+
+        // A scan that succeeds on an empty directory must stay Ok(empty): an
+        // empty library legitimately means every device file is stale, so
+        // emptiness alone must not be treated as a failure.
+        let empty = std::env::temp_dir().join(format!("dap-tui-scan-empty-{pid}"));
+        let _ = fs::remove_dir_all(&empty);
+        fs::create_dir_all(&empty).unwrap();
+        assert!(scan_music_dir(&empty).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_fails_when_a_subdirectory_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root ignores directory permissions, so this distinction can only be
+        // exercised as a regular user (as CI runs).
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        // Skipping an unreadable subtree would silently shrink the source
+        // map, and the next step would treat device files missing from that
+        // incomplete map as stale and delete them.
+        let base = std::env::temp_dir().join(format!("dap-tui-scan-locked-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("locked")).unwrap();
+        fs::write(base.join("locked/song.mp3"), b"x").unwrap();
+        fs::set_permissions(base.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = scan_music_dir(&base).unwrap_err();
+        assert!(err.contains("cannot scan"), "{err}");
+
+        let _ = fs::set_permissions(base.join("locked"), fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_stale_reports_only_files_actually_removed() {
+        let dest = std::env::temp_dir().join(format!("dap-tui-remove-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        fs::create_dir_all(dest.join("Artist")).unwrap();
+        fs::write(dest.join("Artist/gone.mp3"), b"x").unwrap();
+
+        let removed = remove_stale(
+            &dest,
+            &[
+                "Artist/gone.mp3".to_string(),
+                "already-absent.mp3".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!dest.join("Artist/gone.mp3").exists());
+        assert!(!dest.join("Artist").exists(), "empty parent must be pruned");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn remove_stale_fails_when_a_file_cannot_be_removed() {
+        let dest = std::env::temp_dir().join(format!("dap-tui-remove-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        fs::create_dir_all(dest.join("stale-dir")).unwrap();
+
+        let err = remove_stale(&dest, &["stale-dir".to_string()]).unwrap_err();
+        assert!(err.contains("could not remove stale file"), "{err}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fatsort_guard_refuses_a_still_mounted_device() {
+        // Resolve whatever `/` is mounted from, then ask the guard about that
+        // source device: it must refuse while any mount target exists.
+        let (code, source) = capture("findmnt", &["-n", "-o", "SOURCE", "-T", "/"]).unwrap();
+        if code != 0 || source.trim().is_empty() {
+            return; // no findmnt in this environment
+        }
+        let err = ensure_unmounted(source.trim()).unwrap_err();
+        assert!(err.contains("still mounted"), "{err}");
+        assert!(err.contains("refusing to run fatsort"), "{err}");
+
+        // A device with no mount target at all may proceed to fatsort.
+        assert!(ensure_unmounted("/dev/definitely-not-a-dap-tui-device").is_ok());
     }
 }
