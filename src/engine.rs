@@ -807,16 +807,29 @@ fn finalize_fat(device: &Device, ctx: &WorkerCtx) -> Result<(), String> {
 }
 
 /// `fatsort` writes the raw block device, so it must never run while that
-/// filesystem is still mounted — at the old path or anywhere else. Ask findmnt
-/// for the device's current targets rather than trusting the unmount exit
-/// codes or checking a single mount path.
+/// filesystem is still mounted — at the old path or anywhere else. Read the
+/// whole mount table and look for the device there; a query that fails to
+/// answer cannot prove anything, so it fails closed too.
 fn ensure_unmounted(device: &str) -> Result<(), String> {
-    let (code, target) = capture("findmnt", &["-n", "-o", "TARGET", "-S", device])?;
-    if code == 0 && !target.trim().is_empty() {
+    // `-r` keeps one "source target" pair per line without the tree glyphs,
+    // so the target can be quoted in the manual-action error as-is.
+    let (code, table) = capture("findmnt", &["-n", "-r", "-o", "SOURCE,TARGET"])?;
+    verify_unmounted(device, code, &table)
+}
+
+fn verify_unmounted(device: &str, findmnt_code: i32, table: &str) -> Result<(), String> {
+    if findmnt_code != 0 {
         return Err(format!(
-            "{device} is still mounted at {} after the unmount attempts — refusing to run fatsort. Run manually: sudo umount {}",
-            target.trim(),
-            target.trim()
+            "could not read the mount table to verify {device} is unmounted — refusing to run fatsort. Check mounts manually, then run: sudo fatsort {device}"
+        ));
+    }
+    let target = table.lines().find_map(|line| {
+        let (source, target) = line.split_once(' ')?;
+        (source == device).then(|| target.trim())
+    });
+    if let Some(target) = target {
+        return Err(format!(
+            "{device} is still mounted at {target} after the unmount attempts — refusing to run fatsort. Run manually: sudo umount {target}"
         ));
     }
     Ok(())
@@ -1243,7 +1256,8 @@ mod tests {
 
     #[test]
     fn remove_stale_reports_only_files_actually_removed() {
-        let dest = std::env::temp_dir().join(format!("dap-tui-remove-stale-{}", std::process::id()));
+        let dest =
+            std::env::temp_dir().join(format!("dap-tui-remove-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dest);
         fs::create_dir_all(dest.join("Artist")).unwrap();
         fs::write(dest.join("Artist/gone.mp3"), b"x").unwrap();
@@ -1277,8 +1291,27 @@ mod tests {
     }
 
     #[test]
+    fn fatsort_guard_needs_a_positive_mount_table_answer() {
+        // A query that cannot answer proves nothing: refuse rather than assume
+        // the device is unmounted.
+        let err = verify_unmounted("/dev/sda1", 1, "").unwrap_err();
+        assert!(err.contains("could not read the mount table"), "{err}");
+        assert!(err.contains("refusing to run fatsort"), "{err}");
+
+        // A successfully read table with a target for this device must refuse,
+        // even when the target is not the old mount path.
+        let table = "/dev/sdb1 /media/other\n/dev/sda1 /media/ipod";
+        let err = verify_unmounted("/dev/sda1", 0, table).unwrap_err();
+        assert!(err.contains("still mounted at /media/ipod"), "{err}");
+
+        // A successfully read table without this device positively proves it
+        // is unmounted everywhere.
+        verify_unmounted("/dev/sda1", 0, "/dev/sdb1 /media/other").unwrap();
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
-    fn fatsort_guard_refuses_a_still_mounted_device() {
+    fn fatsort_guard_refuses_a_live_mount() {
         // Resolve whatever `/` is mounted from, then ask the guard about that
         // source device: it must refuse while any mount target exists.
         let (code, source) = capture("findmnt", &["-n", "-o", "SOURCE", "-T", "/"]).unwrap();
