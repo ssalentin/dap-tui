@@ -1,6 +1,6 @@
 [package]
 name = "dap-tui"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "Device sync for portable players — TUI edition (ratatui)"
 license = "MIT"

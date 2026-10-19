@@ -424,50 +424,7 @@ fn run_mirror(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result<(), S
         LogLevel::Info,
         format!("Mirroring {label} via rclone {} → {}", source, local_dir.display()),
     );
-    let mut args = vec![
-        "sync".to_string(),
-        source.clone(),
-        local_dir.display().to_string(),
-    ];
-    for pat in &config.storagebox_excludes {
-        args.push("--exclude".to_string());
-        args.push(pat.clone());
-    }
-    // NOTE: do NOT use `--stats-one-line` here. When stdout/stderr are not a
-    // TTY (which is always the case for us — the child is piped), rclone emits
-    // the one-line stats as a single carriage-return-rewritten line that only
-    // surfaces once at the very end (100%). `--progress` instead emits the
-    // multi-line `Transferred: … / …, N%, speed, ETA …` block newline-terminated,
-    // so it streams live through the pipe and we can update the gauge in real
-    // time while a cloud→local mirror is running.
-    //
-    // `--check-first` completes the remote listing before any transfer starts.
-    // Without it (e.g. over SFTP) rclone lists while transferring, so the
-    // `Transferred:` total keeps growing and the percentage stuck near 0% —
-    // early ticks even showed a single file's percentage, which looked like
-    // per-album progress. With the full total known up front the gauge is a
-    // true overall percentage; the initial listing shows as a scan phase.
-    //
-    // `--checkers`/`--transfers` are raised above rclone's defaults (8/4):
-    // against a high-latency SFTP remote the scan and the many-small-files
-    // case are round-trip-bound, so more parallel requests directly cut
-    // wall-clock time. Note these explicit flags take precedence over any
-    // RCLONE_CHECKERS/RCLONE_TRANSFERS environment variables.
-    args.extend(
-        [
-            "--create-empty-src-dirs",
-            "--check-first",
-            "--checkers",
-            "16",
-            "--transfers",
-            "8",
-            "--progress",
-            "--stats",
-            "1s",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
+    let args = rclone_sync_args(config, &source, &local_dir);
 
     stream(ctx, "rclone", &args, |line| {
         if let Some(p) = parse_rclone_stats(line) {
@@ -497,6 +454,85 @@ fn is_rclone_progress_noise(line: &str) -> bool {
         || line.starts_with("Elapsed time:")
         || line.starts_with("Transferring:")
         || line.starts_with("Transferred:")
+}
+
+/// Build the `rclone sync` argv for the StorageBox → local-library mirror.
+///
+/// Kept as a separate function so the throughput flags are testable: a future
+/// refactor that drops them would otherwise silently bring back the slow
+/// large-file behaviour, which is invisible in a quick manual run.
+fn rclone_sync_args(config: &Config, source: &str, local_dir: &Path) -> Vec<String> {
+    let mut args = vec![
+        "sync".to_string(),
+        source.to_string(),
+        local_dir.display().to_string(),
+    ];
+    for pat in &config.storagebox_excludes {
+        args.push("--exclude".to_string());
+        args.push(pat.clone());
+    }
+
+    // NOTE: do NOT use `--stats-one-line` here. When stdout/stderr are not a
+    // TTY (which is always the case for us — the child is piped), rclone emits
+    // the one-line stats as a single carriage-return-rewritten line that only
+    // surfaces once at the very end (100%). `--progress` instead emits the
+    // multi-line `Transferred: … / …, N%, speed, ETA …` block newline-terminated,
+    // so it streams live through the pipe and we can update the gauge in real
+    // time while a cloud→local mirror is running.
+    //
+    // `--check-first` completes the remote listing before any transfer starts.
+    // Without it (e.g. over SFTP) rclone lists while transferring, so the
+    // `Transferred:` total keeps growing and the percentage stuck near 0% —
+    // early ticks even showed a single file's percentage, which looked like
+    // per-album progress. With the full total known up front the gauge is a
+    // true overall percentage; the initial listing shows as a scan phase.
+    //
+    // `--checkers`/`--transfers` are raised above rclone's defaults (8/4):
+    // against a high-latency SFTP remote the scan and the many-small-files
+    // case are round-trip-bound, so more parallel requests directly cut
+    // wall-clock time. Note these explicit flags take precedence over any
+    // RCLONE_CHECKERS/RCLONE_TRANSFERS environment variables.
+    //
+    // Large-file throughput matters because Hörspiele are single files of
+    // 50–240 MB while music tracks are ~5–8 MB, which is exactly why the
+    // audiobook mirror felt so much slower than the music one:
+    //
+    // * `--buffer-size` is the dominant lever. rclone's per-transfer buffer
+    //   defaults to 0 for a plain `sync`, so every read is a synchronous
+    //   round-trip; over a ~45 ms-latency Storagebox link that pins a single
+    //   file to roughly one read per RTT. A 64 MiB buffer lets rclone issue
+    //   reads ahead of the writes and hide that latency. (Measured on the
+    //   same 63 MiB track: 1m39s → 1m08s.)
+    // * `--sftp-chunk-size` raises the SFTP payload packet from the RFC 32 KiB
+    //   default to 255 KiB. Hetzner's Storagebox SFTP accepts the larger
+    //   packets, which cuts the number of round-trips per megabyte ~8x.
+    // * `--sftp-concurrency` (64) is rclone's default but is spelled out so a
+    //   stale RCLONE_SFTP_CONCURRENCY in the environment cannot silently
+    //   regress it — it bounds how many of those larger packets can be in
+    //   flight for a single file.
+    args.extend(
+        [
+            "--create-empty-src-dirs",
+            "--check-first",
+            "--checkers",
+            "16",
+            "--transfers",
+            "8",
+            "--buffer-size",
+            "64M",
+            "--sftp-chunk-size",
+            "255k",
+            "--sftp-concurrency",
+            "64",
+            "--progress",
+            "--stats",
+            "1s",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+
+    args
 }
 
 // ── step 2: device sync ───────────────────────────────────────────────────────
@@ -1252,6 +1288,36 @@ mod tests {
 
         let _ = fs::set_permissions(base.join("locked"), fs::Permissions::from_mode(0o755));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rclone_sync_args_keep_the_large_file_throughput_flags() {
+        // Hörspiele are single files of 50–240 MB versus ~5–8 MB music tracks,
+        // so a dropped buffer/chunk setting silently makes the audiobook
+        // mirror feel far slower than the music one. Pin the flags here.
+        let cfg = crate::config::load(Some(
+            "/nonexistent/dap-tui-test-config.toml".to_string(),
+        ))
+        .expect("config must fall back to defaults");
+        let args = rclone_sync_args(&cfg, "storagebox:hoerspiele-flat", Path::new("/tmp/lib"));
+
+        assert_eq!(args[0], "sync");
+        assert_eq!(args[1], "storagebox:hoerspiele-flat");
+        assert_eq!(args[2], "/tmp/lib");
+
+        let has_pair = |flag: &str, value: &str| {
+            args.windows(2).any(|w| w[0] == flag && w[1] == value)
+        };
+        assert!(has_pair("--buffer-size", "64M"), "{args:?}");
+        assert!(has_pair("--sftp-chunk-size", "255k"), "{args:?}");
+        assert!(has_pair("--sftp-concurrency", "64"), "{args:?}");
+        assert!(has_pair("--checkers", "16"), "{args:?}");
+        assert!(has_pair("--transfers", "8"), "{args:?}");
+        assert!(has_pair("--stats", "1s"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--check-first"), "{args:?}");
+        // `--stats-one-line` would collapse the live progress into one line
+        // that only appears once at 100%.
+        assert!(!args.iter().any(|a| a.contains("one-line")), "{args:?}");
     }
 
     #[test]

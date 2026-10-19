@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ssalentin/dap-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/ssalentin/dap-tui/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/ssalentin/dap-tui)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.3-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.3.4-blue)](Cargo.toml)
 
 A terminal UI for device sync of portable music players, rewritten from scratch
 in Rust on top of [ratatui](https://ratatui.rs/).
