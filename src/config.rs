@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_CONFIG_FILE: &str = "~/.config/dap-sync/config.toml";
 pub const DEFAULT_SYNC_COMMAND: &str = "podkit sync -c main";
 pub const DEFAULT_STORAGEBOX_SOURCE: &str = "storagebox:masters";
-pub const DEFAULT_STORAGEBOX_HOERSPIELE_SOURCE: &str = "storagebox:backup/hoerspiele";
+pub const DEFAULT_STORAGEBOX_HOERSPIELE_SOURCE: &str = "storagebox:hoerspiele-flat";
 pub const DEFAULT_EXCLUDES: &[&str] = &["/Music/**", ".DS_Store", ".localized"];
 
 fn expand_home(s: &str) -> PathBuf {

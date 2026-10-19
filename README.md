@@ -121,6 +121,7 @@ local_hoerspiele_dir = "~/hoerspiele"
 
 [storagebox]
 source = "storagebox:masters"
+hoerspiele_source = "storagebox:hoerspiele-flat"
 exclude = ["/Music/**", ".DS_Store", ".localized"]
 
 [[devices]]
