@@ -670,30 +670,23 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     let dst_map = scan_music_dir(&dest)
         .map_err(|e| format!("device scan failed — refusing to sync: {e}"))?;
 
-    // (key, real_path) pairs: sort by the NFC comparison key for stable FAT
-    // order, but hand rsync the real on-disk path so `--files-from` resolves
-    // against the actual bytes, not the normalized comparison key.
-    let mut to_copy: Vec<(&String, &String)> = Vec::new();
-    for (k, (real, size, mtime)) in &src_map {
-        let changed = dst_map
-            .get(k)
-            .map(|(_, dsize, dmtime)| dsize != size || dmtime != mtime)
-            .unwrap_or(true);
-        if changed {
-            to_copy.push((k, real));
-        }
-    }
-    if device.preserve_fat_order {
-        to_copy.sort_by(|a, b| a.0.cmp(b.0));
-    }
-    let to_copy: Vec<String> = to_copy.into_iter().map(|(_, real)| real.clone()).collect();
-    // Delete the real on-disk paths from the scan (not the NFC keys) so
-    // NFD-named files are removed by the name they actually have.
-    let to_delete: Vec<String> = dst_map
-        .iter()
-        .filter(|(k, _)| !src_map.contains_key(*k))
-        .map(|(_, (real, _, _))| real.clone())
-        .collect();
+    let plan = plan_device_sync(
+        &src_dir,
+        &src_map,
+        &dst_map,
+        // Extra device-side excludes only make sense for a library subfolder.
+        // When the destination *is* the mount root, `<mount>/.DS_Store` and
+        // `<mount>/._*` match the volume's own metadata files, which are not
+        // part of the library at all.
+        if device_dest(&mount, &device.music_folder) == mount {
+            &[]
+        } else {
+            DEVICE_EXCLUDES
+        },
+        device.preserve_fat_order,
+    );
+    let to_copy = plan.to_copy;
+    let to_delete = plan.to_delete;
 
     ctx.log(
         LogLevel::Info,
@@ -720,17 +713,21 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
         ctx.set_step(1, StepStatus::Active, format!("copying {} file(s)…", to_copy.len()));
         let tmp = write_file_list(&to_copy)?;
         let res = {
-            let args = vec![
+            let mut args = vec![
                 "-t".to_string(),
                 "--files-from".to_string(),
                 tmp.clone(),
                 "--info=progress2".to_string(),
                 "--out-format=%n".to_string(),
-                "--exclude=.DS_Store".to_string(),
-                "--exclude=._*".to_string(),
+            ];
+            for pat in plan.excludes {
+                args.push("--exclude".to_string());
+                args.push(pat.to_string());
+            }
+            args.extend([
                 format!("{}/", src_dir.display()),
                 dest.display().to_string(),
-            ];
+            ]);
             let total = to_copy.len() as u64;
             stream(ctx, "rsync", &args, |line| {
                 match parse_rsync_line(line) {
@@ -758,6 +755,119 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     }
 
     Ok(())
+}
+
+/// Device-side metadata that is never part of a synced library subfolder.
+const DEVICE_EXCLUDES: &[&str] = &[".DS_Store", "._*"];
+
+/// What a device sync has to do, derived from the two directory scans.
+struct DeviceSyncPlan {
+    /// Relative on-disk paths to hand rsync's `--files-from` (NFC-sorted when
+    /// the device wants FAT order).
+    to_copy: Vec<String>,
+    /// Relative on-disk paths on the device that the source does not have.
+    to_delete: Vec<String>,
+    /// `--exclude` patterns that also apply to the staleness check.
+    excludes: &'static [&'static str],
+}
+
+/// Compute the copy/delete plan for a device sync.
+///
+/// Two invariants matter here:
+///
+/// * **The device mirrors the source.** A file on the device that the library
+///   does not have is stale and gets removed — that is what makes a sync a
+///   sync rather than an accumulating copy.
+/// * **Files the sync itself excludes are not stale.** rsync never copies them,
+///   so treating them as stale would mean deleting device metadata (and, on a
+///   card mirrored at its mount root, the volume's own `.DS_Store`/`._*` files)
+///   on every run.
+fn plan_device_sync(
+    src_dir: &Path,
+    src_map: &HashMap<String, (String, u64, i64)>,
+    dst_map: &HashMap<String, (String, u64, i64)>,
+    excludes: &'static [&'static str],
+    preserve_fat_order: bool,
+) -> DeviceSyncPlan {
+    // (key, real_path) pairs: sort by the NFC comparison key for stable FAT
+    // order, but hand rsync the real on-disk path so `--files-from` resolves
+    // against the actual bytes, not the normalized comparison key.
+    let mut to_copy: Vec<(&String, &String)> = Vec::new();
+    for (k, (real, size, mtime)) in src_map {
+        let changed = dst_map
+            .get(k)
+            .map(|(_, dsize, dmtime)| dsize != size || dmtime != mtime)
+            .unwrap_or(true);
+        if changed {
+            to_copy.push((k, real));
+        }
+    }
+    if preserve_fat_order {
+        to_copy.sort_by(|a, b| a.0.cmp(b.0));
+    }
+    let to_copy: Vec<String> = to_copy.into_iter().map(|(_, real)| real.clone()).collect();
+
+    // Delete the real on-disk paths from the scan (not the NFC keys) so
+    // NFD-named files are removed by the name they actually have.
+    let to_delete: Vec<String> = dst_map
+        .iter()
+        // A source library that scanned empty deletes everything on the
+        // device except excluded metadata. That is the intended mirror
+        // behaviour (an emptied library means an emptied device); the scan
+        // itself fails closed so an unreadable source never lands here.
+        .filter(|(k, _)| !src_map.contains_key(*k))
+        .filter(|(_, (real, _, _))| !is_excluded(real, src_dir, excludes))
+        .map(|(_, (real, _, _))| real.clone())
+        .collect();
+
+    DeviceSyncPlan {
+        to_copy,
+        to_delete,
+        excludes,
+    }
+}
+
+/// Whether a relative path matches one of the sync's `--exclude` patterns.
+///
+/// The patterns in use are single-component name globs (`.DS_Store`, `._*`),
+/// so matching any component of the path is equivalent to rsync's behaviour and
+/// keeps the common case — a flat Hörspiele library at the card root — intact.
+fn is_excluded(rel: &str, src_dir: &Path, excludes: &[&str]) -> bool {
+    if excludes.is_empty() || src_dir.as_os_str().is_empty() {
+        return false;
+    }
+    rel.split('/').any(|component| {
+        excludes
+            .iter()
+            .any(|pat| wildcard_match(pat.as_bytes(), component.as_bytes()))
+    })
+}
+
+/// Minimal `*`/`?` glob matcher (`*` may span the rest of the name, `?` one
+/// byte), enough for the metadata exclude patterns above.
+fn wildcard_match(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star, mut retry) = (None::<usize>, 0usize);
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            retry = t;
+        } else if let Some(s) = star {
+            p = s + 1;
+            retry += 1;
+            t = retry;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 /// Resolve the sync destination for a device: the mount point joined with the
@@ -1340,6 +1450,103 @@ mod tests {
     }
 
     #[test]
+    fn device_sync_deletes_files_missing_from_the_source() {
+        // The device mirrors the source: what the library no longer has must
+        // be removed, including items inside directories that still exist.
+        let src = std::env::temp_dir().join(format!("dap-tui-plan-src-{}", std::process::id()));
+        fs::create_dir_all(&src).unwrap();
+
+        let mut src_map = HashMap::new();
+        src_map.insert("Keep.mp3".to_string(), ("Keep.mp3".to_string(), 10u64, 100i64));
+
+        let mut dst_map = HashMap::new();
+        dst_map.insert("Keep.mp3".to_string(), ("Keep.mp3".to_string(), 10u64, 100i64));
+        dst_map.insert("Gone.mp3".to_string(), ("Gone.mp3".to_string(), 10u64, 100i64));
+        dst_map.insert(
+            "Serie/Folge 2.mp3".to_string(),
+            ("Serie/Folge 2.mp3".to_string(), 10u64, 100i64),
+        );
+
+        let plan = plan_device_sync(&src, &src_map, &dst_map, DEVICE_EXCLUDES, true);
+        assert!(plan.to_copy.is_empty(), "identical file must not be recopied");
+        let mut deleted = plan.to_delete.clone();
+        deleted.sort();
+        assert_eq!(deleted, vec!["Gone.mp3".to_string(), "Serie/Folge 2.mp3".to_string()]);
+    }
+
+    #[test]
+    fn device_sync_copies_new_and_changed_files() {
+        let src = std::env::temp_dir().join(format!("dap-tui-plan-src-{}", std::process::id()));
+        fs::create_dir_all(&src).unwrap();
+
+        let mut src_map = HashMap::new();
+        src_map.insert("New.mp3".to_string(), ("New.mp3".to_string(), 5u64, 50i64));
+        src_map.insert("Changed.mp3".to_string(), ("Changed.mp3".to_string(), 7u64, 70i64));
+
+        let mut dst_map = HashMap::new();
+        dst_map.insert("Changed.mp3".to_string(), ("Changed.mp3".to_string(), 3u64, 30i64));
+
+        let plan = plan_device_sync(&src, &src_map, &dst_map, DEVICE_EXCLUDES, true);
+        let mut copied = plan.to_copy.clone();
+        copied.sort();
+        assert_eq!(copied, vec!["Changed.mp3".to_string(), "New.mp3".to_string()]);
+        assert!(plan.to_delete.is_empty());
+    }
+
+    #[test]
+    fn device_sync_never_deletes_excluded_metadata() {
+        // Files the sync excludes are never copied, so they must not be
+        // treated as stale either. This is what protects a volume's own
+        // metadata when a card is mirrored at its mount root.
+        let src = std::env::temp_dir().join(format!("dap-tui-plan-src-{}", std::process::id()));
+        fs::create_dir_all(&src).unwrap();
+
+        let src_map = HashMap::new();
+        let mut dst_map = HashMap::new();
+        dst_map.insert(".DS_Store".to_string(), (".DS_Store".to_string(), 1u64, 2i64));
+        dst_map.insert("._Folge 1.mp3".to_string(), ("._Folge 1.mp3".to_string(), 1u64, 2i64));
+
+        let plan = plan_device_sync(&src, &src_map, &dst_map, DEVICE_EXCLUDES, true);
+        assert!(plan.to_delete.is_empty(), "excluded metadata must survive: {:?}", plan.to_delete);
+
+        // With no excludes (mount-root destination) nothing is filtered; the
+        // caller simply passes an empty list.
+        let plan = plan_device_sync(&src, &src_map, &dst_map, &[], true);
+        assert_eq!(plan.to_delete.len(), 2);
+    }
+
+    #[test]
+    fn empty_source_plan_removes_everything_on_the_device() {
+        let src = std::env::temp_dir().join(format!("dap-tui-plan-src-{}", std::process::id()));
+        fs::create_dir_all(&src).unwrap();
+
+        let src_map = HashMap::new();
+        let mut dst_map = HashMap::new();
+        dst_map.insert("Old.mp3".to_string(), ("Old.mp3".to_string(), 1u64, 2i64));
+
+        let plan = plan_device_sync(&src, &src_map, &dst_map, DEVICE_EXCLUDES, true);
+        assert_eq!(plan.to_delete, vec!["Old.mp3".to_string()]);
+        assert!(plan.to_copy.is_empty());
+    }
+
+    #[test]
+    fn wildcard_match_handles_the_exclude_patterns() {
+        assert!(wildcard_match(b".DS_Store", b".DS_Store"));
+        assert!(wildcard_match(b"._*", b"._Folge 1.mp3"));
+        assert!(!wildcard_match(b"._*", b"Folge 1.mp3"));
+        assert!(wildcard_match(b"*.mp3", b"Folge 1.mp3"));
+        assert!(wildcard_match(b"?olge.mp3", b"Folge.mp3"));
+        assert!(!wildcard_match(b"*.mp3", b"Folge.flac"));
+    }
+
+    #[test]
+    fn is_excluded_checks_every_path_component() {
+        let src = Path::new("/tmp/dap-tui-is-excluded");
+        assert!(is_excluded(".DS_Store", src, DEVICE_EXCLUDES));
+        assert!(is_excluded("Serie/.DS_Store", src, DEVICE_EXCLUDES));
+        assert!(!is_excluded("Serie/Folge 1.mp3", src, DEVICE_EXCLUDES));
+    }
+
     #[test]
     fn device_dest_uses_mount_root_for_empty_folder() {
         let mount = Path::new("/run/media/sebastian/MLOVE");

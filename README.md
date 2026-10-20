@@ -144,8 +144,12 @@ Firmware types: `apple` (podkit command), `rockbox`, `android`, `sony`
    phase is displayed as `Scanning remote · N items listed`.
 2. **Diff** — the device is scanned and compared to the source with
    NFC-normalised paths, size, and 2-second-rounded mtimes (FAT32 friendly).
-3. **Sync** — stale files are removed first, then `rsync --files-from` copies
-   only what changed, with live per-file progress.
+3. **Sync** — the device mirrors the source: every file on the device that the
+   source does not have is removed (then empty directories are pruned), and
+   `rsync --files-from` copies only what changed, with live per-file progress.
+   Files matched by the sync's own excludes (`.DS_Store`, `._*`) are never
+   copied, so they are never treated as stale either — a card mirrored at its
+   mount root keeps the volume's own metadata files.
 4. **Finalize** (mlove) — unmounts the volume and runs `fatsort` via
    `sudo -n` to keep FAT directory order stable. If passwordless sudo is not
    available the step is reported as a warning and the commands are printed.
