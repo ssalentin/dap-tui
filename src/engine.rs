@@ -654,7 +654,11 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     } else {
         (config.local_music_dir.clone(), "Music")
     };
-    let dest = mount.join(&device.music_folder);
+    // An empty `music_folder` means "the mount root itself" — used for players
+    // whose library is the card root rather than a named subfolder. Joining an
+    // empty string is already the mount, but the intent is spelled out here so
+    // the root case is not mistaken for a missing configuration value.
+    let dest = device_dest(&mount, &device.music_folder);
     fs::create_dir_all(&dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
 
     ctx.log(LogLevel::Info, format!("Scanning local {label} library…"));
@@ -754,6 +758,21 @@ fn run_rsync_device(config: &Config, device: &Device, ctx: &WorkerCtx) -> Result
     }
 
     Ok(())
+}
+
+/// Resolve the sync destination for a device: the mount point joined with the
+/// configured `music_folder`.
+///
+/// An empty (or whitespace-only) `music_folder` selects the mount root, which is
+/// how a player whose whole card is the library is mirrored. Every other value
+/// is a plain subfolder name.
+pub fn device_dest(mount: &Path, music_folder: &str) -> PathBuf {
+    let folder = music_folder.trim();
+    if folder.is_empty() {
+        mount.to_path_buf()
+    } else {
+        mount.join(folder)
+    }
 }
 
 fn remove_stale(dest: &Path, to_delete: &[String]) -> Result<usize, String> {
@@ -1318,6 +1337,19 @@ mod tests {
         // `--stats-one-line` would collapse the live progress into one line
         // that only appears once at 100%.
         assert!(!args.iter().any(|a| a.contains("one-line")), "{args:?}");
+    }
+
+    #[test]
+    #[test]
+    fn device_dest_uses_mount_root_for_empty_folder() {
+        let mount = Path::new("/run/media/sebastian/MLOVE");
+        // The Mlove card is mirrored at its root: the flat library is the card,
+        // not a `Hörspiele/` subfolder (a leftover subfolder is exactly the
+        // stale content a root sync is meant to delete).
+        assert_eq!(device_dest(mount, ""), mount);
+        assert_eq!(device_dest(mount, "   "), mount);
+        assert_eq!(device_dest(mount, "Music"), mount.join("Music"));
+        assert_eq!(device_dest(mount, "Hörspiele"), mount.join("Hörspiele"));
     }
 
     #[test]
